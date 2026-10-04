@@ -201,6 +201,23 @@ class SetupTests(RepoCase):
         self.assertTrue(self.hook('pre-push').exists())                               # never ours, never touched
         self.assertEqual(run('setup', '--uninstall')[0], 0)                            # idempotent
 
+    def test_warn_only_mode_warns_then_enforcing_mode_refuses(self):
+        wt = self.add_worktree('party', 'feat/avr-900-thing', 'avrana-party.wt-avr900')
+        self.assertEqual(run('setup', '--warn-only')[0], 0)
+        code, out, _ = run('setup', '--check')
+        self.assertEqual(code, 0)
+        self.assertIn('warn-only', out)
+        (wt / 'README.md').write_text('x' + chr(10), encoding='utf-8')
+        git(wt, 'add', 'README.md')
+        code, err = commit(wt, 'codex-bbbb')
+        self.assertEqual(code, 0)
+        self.assertIn('WARNING (not enforced yet', err)
+        self.assertIn('must be claimed', err)
+        self.assertIn('enforcing', run('setup')[1])
+        (wt / 'README.md').write_text('y' + chr(10), encoding='utf-8')
+        git(wt, 'add', 'README.md')
+        self.assertNotEqual(commit(wt, 'codex-bbbb')[0], 0)
+
     def test_core_hookspath_stops_setup_with_a_clear_message(self):
         git(self.repo('party'), 'config', 'core.hooksPath', '.husky')
         code, out, _ = run('setup')

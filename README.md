@@ -24,6 +24,7 @@ The managed checkouts sit beside this repository (or set `AI_WORKFLOW_ROOT`):
 ```sh
 python aw.py setup            # installs the commit hooks in each managed repository; verifies everything
 python aw.py setup --check    # report only
+python aw.py setup --warn-only  # same check, but it warns and lets the commit through (for rollout)
 python aw.py setup --chain    # keep an existing foreign pre-commit hook; it runs after the claim check
 python aw.py setup --uninstall
 ```

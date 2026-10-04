@@ -1,7 +1,7 @@
 """ai-workflow: cross-project development control. One place that answers what is being worked
 on, by whom, in which worktree, in what state, and what needs the owner.
 
-    python aw.py setup [--check | --uninstall] [--chain]   install the commit hooks; verify the setup
+    python aw.py setup [--check | --uninstall | --warn-only] [--chain]   install the commit hooks; verify the setup
     python aw.py start AVR-236 [--repo party|games|both]   readiness, worktrees, claims, context: then "Implement AVR-236"
     python aw.py issue AVR-236                             readiness and structured context, changing nothing
     python aw.py status                                    every worktree: branch, issue, claim, drift, unfinished work
@@ -360,7 +360,8 @@ def cmd_setup(args, cfg):
         elif args.uninstall:
             reports.append({'name': name, **hooks.uninstall(repo['path'])})
         else:
-            reports.append({'name': name, **hooks.install(repo['path'], AW, chain=args.chain, check_only=args.check)})
+            reports.append({'name': name, **hooks.install(repo['path'], AW, chain=args.chain, check_only=args.check,
+                                                          warn_only=args.warn_only)})
         ok = ok and reports[-1]['ok']
     env = []
     if not args.uninstall:
@@ -372,7 +373,8 @@ def cmd_setup(args, cfg):
         env.append({'check': 'identity', 'ok': bool(owner), 'detail': owner or 'no session identity in this shell: set AI_WORKFLOW_SESSION before committing on issue branches'})
     out = []
     for r in reports:
-        out.append(f'{r["name"]}: {"ok" if r["ok"] else "PROBLEM"}  ({r["repo"]})')
+        mode = f', {r["mode"]}' if r.get('mode') else ''
+        out.append(f'{r["name"]}: {"ok" if r["ok"] else "PROBLEM"}{mode}  ({r["repo"]})')
         out += [f'  {a}' for a in r['actions']] + [f'  ! {p}' for p in r['problems']]
         if r['ok'] and not r['actions']:
             out.append('  nothing to change')
@@ -383,6 +385,9 @@ def cmd_setup(args, cfg):
 
 def cmd_hook(args, cfg):
     code, message = hooks.check(os.getcwd(), model.owner_identity()[0])
+    if code and args.warn_only:
+        print(f'ai-workflow WARNING (not enforced yet; this commit will be refused once enforcement is on):' + chr(10) + f'{message}', file=sys.stderr)
+        return 0
     if message:
         print(f'ai-workflow: {message}', file=sys.stderr)
     return code
@@ -423,8 +428,10 @@ def main(argv=None):
     p.add_argument('--check', action='store_true', help='report only; change nothing')
     p.add_argument('--chain', action='store_true', help='keep an existing foreign hook and run it after the claim check')
     p.add_argument('--uninstall', action='store_true', help='remove our hooks and restore any chained one')
+    p.add_argument('--warn-only', action='store_true', help='install the hooks in a mode that warns instead of refusing')
     p = sub.add_parser('hook')
     p.add_argument('name', nargs='?', default='pre-commit')
+    p.add_argument('--warn-only', action='store_true')
     sub.add_parser('guard')
     args = ap.parse_args(argv)
     if args.command == 'guard':

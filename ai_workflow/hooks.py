@@ -12,7 +12,9 @@ Rules at commit time, in a repository the hooks are installed in:
 - unclaimed on an issue branch (`type/avr-N-...`): refused until claimed;
 - unclaimed on any other branch: allowed.
 
-`git commit --no-verify` remains the human override. A failure of the tool itself (missing
+`setup --warn-only` installs the same check in a mode that prints the refusal and lets the commit
+through, for rolling enforcement out while sessions are mid-work. `git commit --no-verify` remains
+the human override. A failure of the tool itself (missing
 interpreter, unreadable config) warns and lets the commit through: only a claim decision blocks.
 """
 import os
@@ -27,14 +29,15 @@ CHAINED = '.before-ai-workflow'
 REFUSED = 3
 
 
-def script(aw, python):
+def script(aw, python, warn_only=False):
+    flag = ' --warn-only' if warn_only else ''
     return f'''#!/bin/sh
 {MARKER} v1: refuses a commit in a worktree claimed by another session.
 # Installed by `aw.py setup`; remove with `aw.py setup --uninstall`. Do not edit: it is rewritten.
 AW="{aw}"
 PY="{python}"
 if [ -f "$AW" ]; then
-  "$PY" "$AW" hook "$(basename "$0")"
+  "$PY" "$AW" hook "$(basename "$0")"{flag}
   rc=$?
   if [ "$rc" -eq {REFUSED} ]; then exit 1; fi
   if [ "$rc" -ne 0 ]; then echo "ai-workflow: claim check could not run (exit $rc); commit not blocked" >&2; fi
@@ -62,7 +65,7 @@ def _ours(path):
         return False
 
 
-def install(repo, aw, python=None, chain=False, check_only=False):
+def install(repo, aw, python=None, chain=False, check_only=False, warn_only=False):
     """Install or verify the hooks in one repository. Returns {'ok', 'actions', 'problems'}.
 
     An existing hook that is not ours is never overwritten: it is a problem to report, unless
@@ -100,7 +103,8 @@ def install(repo, aw, python=None, chain=False, check_only=False):
             probe.unlink()
         except OSError:
             problem(f'claims directory {claim_dir} is not writable')
-    text = script(Path(aw).as_posix(), Path(python or sys.executable).as_posix())
+    text = script(Path(aw).as_posix(), Path(python or sys.executable).as_posix(), warn_only)
+    other = script(Path(aw).as_posix(), Path(python or sys.executable).as_posix(), not warn_only)
     for name in HOOKS:
         path = Path(directory) / name
         if path.exists() and not _ours(path):
@@ -117,7 +121,9 @@ def install(repo, aw, python=None, chain=False, check_only=False):
                 continue
             path.rename(kept)
             report['actions'].append(f'kept the existing {name} as {kept.name}; it runs after the claim check')
-        if path.exists() and path.read_text(encoding='utf-8', errors='replace') == text:
+        current = path.read_text(encoding='utf-8', errors='replace') if path.exists() else None
+        if current == text or (check_only and current == other):      # --check accepts either mode and names it
+            report['mode'] = 'warn-only' if '--warn-only' in current else 'enforcing'
             continue
         if check_only:
             problem(f'{path} is {"out of date" if path.exists() else "not installed"}')
@@ -126,7 +132,8 @@ def install(repo, aw, python=None, chain=False, check_only=False):
         existed = path.exists()
         path.write_text(text, encoding='utf-8', newline='\n')
         os.chmod(path, 0o755)
-        report['actions'].append(f'{"updated" if existed else "installed"} {path}')
+        report['mode'] = 'warn-only' if warn_only else 'enforcing'
+        report['actions'].append(f'{"updated" if existed else "installed"} {path} ({report["mode"]})')
     return report
 
 
