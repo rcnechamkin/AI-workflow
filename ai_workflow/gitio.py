@@ -4,7 +4,12 @@ from pathlib import Path
 import re
 import subprocess
 
-AVR = re.compile(r'(?:^|[/_-])avr-(\d+)(?:[-/_]|$)', re.I)
+PREFIX = 'AVR'          # the issue-key prefix of the project being managed; set from workflow.json
+
+
+def set_prefix(prefix):
+    global PREFIX
+    PREFIX = prefix.upper()
 
 
 def git(cwd, *args, timeout=60):
@@ -17,14 +22,15 @@ def git(cwd, *args, timeout=60):
     return p.returncode, p.stdout.strip()
 
 
-def issue_of(branch):
-    m = AVR.search(branch or '')
-    return f'AVR-{int(m[1])}' if m else None
+def issue_of(text):
+    """The issue a branch name or PR title carries (`feat/avr-236-x`, `Fix it (AVR-236)`), or None."""
+    m = re.search(rf'(?:^|[^a-z0-9]){PREFIX}-(\d+)(?![0-9])', text or '', re.I)
+    return f'{PREFIX}-{int(m[1])}' if m else None
 
 
 def issue_id(text):
-    m = re.fullmatch(r'(?i)avr-?(\d+)', (text or '').strip())
-    return f'AVR-{int(m[1])}' if m else None
+    m = re.fullmatch(rf'(?i){PREFIX}-?(\d+)', (text or '').strip())
+    return f'{PREFIX}-{int(m[1])}' if m else None
 
 
 def toplevel(path):
@@ -101,3 +107,29 @@ def drift(worktree, base='origin/main'):
 def rev(repo, ref):
     rc, out = git(repo, 'rev-parse', ref)
     return out if rc == 0 else None
+
+
+def current_branch(worktree):
+    rc, out = git(worktree, 'branch', '--show-current')
+    return out if rc == 0 and out else None
+
+
+def fetch_main(repo):
+    return git(repo, 'fetch', 'origin', 'main', '--quiet', timeout=180)[0] == 0
+
+
+def unmerged_branches(repo, issue):
+    """Branches carrying `issue` that hold commits origin/main lacks: {'local': [...], 'remote': [...]}, or None."""
+    rc, out = git(repo, 'for-each-ref', '--format=%(refname)', '--no-merged', 'origin/main', 'refs/heads', 'refs/remotes/origin')
+    if rc:
+        return None
+    found = {'local': [], 'remote': []}
+    for ref in out.splitlines():
+        kind, name = ('local', ref.removeprefix('refs/heads/')) if ref.startswith('refs/heads/') else ('remote', ref.removeprefix('refs/remotes/origin/'))
+        if issue_of(name) == issue:
+            found[kind].append(name)
+    return found
+
+
+def branch_exists(repo, name):
+    return git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{name}')[0] == 0 or         git(repo, 'rev-parse', '--verify', '--quiet', f'refs/remotes/origin/{name}')[0] == 0

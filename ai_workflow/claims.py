@@ -1,7 +1,7 @@
 """Worktree claims: a local, uncommitted lease saying which agent session is working where.
 
 One JSON file per worktree in the owning repository's git common directory
-(`<repo>/.git/avrana/claims/`), so every worktree of that repository sees the same claims and
+(`<repo>/.git/ai-workflow/claims/`), so every worktree of that repository sees the same claims and
 nothing is ever committed. A claim holds no secrets and no personal data: an opaque session
 label, the agent kind, the branch, the AVR issue and timestamps. Deleting the directory loses
 nothing that cannot be re-claimed.
@@ -19,7 +19,7 @@ from pathlib import Path
 import re
 import time
 
-SCHEMA = 'avrana.claim/v1'
+SCHEMA = 'ai-workflow.claim/v1'
 DEFAULT_TTL_HOURS = 6
 HEARTBEAT_MIN_SECONDS = 300
 
@@ -43,7 +43,7 @@ def norm(path):
 def claim_file(common_dir, worktree):
     n = norm(worktree)
     name = re.sub(r'[^A-Za-z0-9._-]', '_', n.rsplit('/', 1)[-1]) or 'worktree'
-    return Path(common_dir) / 'avrana' / 'claims' / f'{name}-{hashlib.sha1(n.encode()).hexdigest()[:10]}.json'
+    return Path(common_dir) / 'ai-workflow' / 'claims' / f'{name}-{hashlib.sha1(n.encode()).hexdigest()[:10]}.json'
 
 
 def read(path):
@@ -126,7 +126,8 @@ def describe(claim, now=None):
     if claim.get('corrupt'):
         return 'an unreadable claim file'
     issue = f' for {claim["issue"]}' if claim.get('issue') else ''
-    return f'{claim["owner"]} ({claim.get("agent", "agent")}){issue}, {state(claim, now)}, last active {claim["heartbeat_at"]}'
+    offer = f', offered to {claim["handoff_to"]}' if claim.get('handoff_to') else ''
+    return f'{claim["owner"]} ({claim.get("agent", "agent")}){issue}, {state(claim, now)}{offer}, last active {claim["heartbeat_at"]}'
 
 
 def acquire(path, worktree, owner, *, agent='agent', issue=None, branch=None, repo=None, note='',
@@ -148,7 +149,7 @@ def acquire(path, worktree, owner, *, agent='agent', issue=None, branch=None, re
                'ttl_hours': ttl_hours, 'note': note}
         if st == 'free':
             code = 'claimed'
-        elif st != 'corrupt' and current['owner'] == owner and st != 'handoff':
+        elif st != 'corrupt' and current['owner'] == owner:      # ours; claiming again also withdraws a handoff offer
             doc['claimed_at'] = current.get('claimed_at', doc['claimed_at'])
             doc['issue'] = issue or current.get('issue')
             doc['note'] = note or current.get('note', '')

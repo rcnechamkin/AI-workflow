@@ -1,60 +1,133 @@
-# avrana-workflow
+# AI-workflow
 
-Cross-repository development control for [Avrana Party](https://github.com/rcnechamkin/avrana-party)
-and [Avrana Party Games](https://github.com/rcnechamkin/avrana-party-games): who is working where,
-what state an issue and its PRs are in, and what actually needs the owner. Python standard library
-only. Design and boundary: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Cross-project development control for agent-assisted work. It answers, from one place: is this
+issue ready, which repositories does it touch, where is the work, who holds it, what state are its
+PRs and CI in, and what actually needs the owner.
 
-It expects to sit beside the two checkouts (or set `AVRANA_ROOT`):
+It is configured (`workflow.json`) for [Avrana Party](https://github.com/rcnechamkin/avrana-party)
+and [Avrana Party Games](https://github.com/rcnechamkin/avrana-party-games). Python standard
+library only. Boundary and state model: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+It never merges, pushes, deploys, or writes to Linear or GitHub. Those stay with the owner.
+
+## Layout
+
+The managed checkouts sit beside this repository (or set `AI_WORKFLOW_ROOT`):
 
 ```
-Projects/
-  avrana-party/  avrana-party-games/  avrana-workflow/
+<projects>/
+  AI-workflow/   avrana-party/   avrana-party-games/
 ```
 
-## Commands
+## Setup (once per machine)
 
 ```sh
-python aw.py status                                  # every worktree: branch, issue, claim, drift, unfinished work
-python aw.py issue AVR-236 [--json]                  # structured context and blockers for one issue
-python aw.py worktree AVR-236 --repo party --type feat --desc native-registry   # dedicated worktree from origin/main, claimed
-python aw.py claim [AVR-236] [--path P]              # claim this worktree, or every worktree of the issue
-python aw.py handoff [AVR-236] --to codex-1a2b --note "tests red in test_x"
-python aw.py release [AVR-236]
-python aw.py prs [AVR-237]                           # PRs, CI and pairing in both repositories
-python aw.py needs-cody                              # the owner's queue, agent work, and what could not be checked
+python aw.py setup            # installs the commit hooks in each managed repository; verifies everything
+python aw.py setup --check    # report only
+python aw.py setup --warn-only  # same check, but it warns and lets the commit through (for rollout)
+python aw.py setup --chain    # keep an existing foreign pre-commit hook; it runs after the claim check
+python aw.py setup --uninstall
 ```
 
-Put options after the command. `--json` gives the structured form of every answer. Exit codes:
-0 ok, 2 usage, 3 refused (someone else holds the claim), 4 a required source was unavailable.
+`setup` is idempotent. It never overwrites a hook it did not write: it stops and says so, unless
+you pass `--chain`. If `core.hooksPath` is set, it stops and tells you which line to add yourself.
+It also reports whether Linear, GitHub and a session identity are available.
 
-It writes only local claim files and, for `worktree`, a new branch and worktree. It never pushes,
-merges, deploys, or writes to Linear or GitHub.
+## The loop
 
-## Identity
+```sh
+python aw.py issue AVR-236            # readiness and context; changes nothing
+python aw.py start AVR-236            # ready? -> worktree(s) from origin/main, claimed, context printed
+#   ... the agent is told only: Implement AVR-236 ...
+python aw.py prs AVR-236              # PRs, CI, review, pairing, distance behind main
+python aw.py handoff AVR-236 --to any --note "tests red in test_x"     # or --to cody to ask the owner
+python aw.py release AVR-236
+python aw.py needs-cody               # the owner's queue
+python aw.py status                   # every worktree: branch, issue, claim, drift, unfinished work
+```
 
-Claims need a session label. Claude Code sessions get `claude-<8 chars>` automatically. Anything
-else sets one: `AVRANA_SESSION=codex-1a2b` (or `--owner`). Labels are opaque; do not put names or
-secrets in them.
+Options go after the command; `--json` returns every answer as data. Exit codes: 0 ok, 2 usage,
+3 refused, 4 a required source was unavailable.
+
+### `start`
+
+`start AVR-N` reads Linear, checks readiness, and refuses when the issue is blocked, undecided,
+finished, already in PR, or held by another session. Otherwise it fetches `origin/main`, finds the
+issue's existing worktree or unmerged branch (or creates `type/avr-N-description` in
+`<repo>.wt-avrN`), does the same in the second repository for a paired change, claims them, and
+prints paths, the repositories' `AGENTS.md` and the follow-up commands. It creates nothing when it
+refuses.
+
+When the issue does not follow the template the owner can supply what is missing:
+`--repo party|games|both`, and `--decisions-confirmed` (the owner's statement that no product
+decision is open; an agent must not pass it on its own).
+
+### Readiness
+
+| State | Derived from |
+|---|---|
+| Done | Linear `Done`, `Canceled`, `Duplicate` |
+| Ready for Playtest | `In Review` + label `Human Validation`, no open PR |
+| PR / CI | an open PR names the issue, or Linear `In Review` |
+| Needs Cody | unresolved Open Decisions, or `Backlog` |
+| Blocked | a `blocked by` dependency that is not finished |
+| In Progress | Linear `In Progress`, or a worktree with a claim, commits or uncommitted changes |
+| Ready for Agent | `Todo`, Open Decisions says none, repositories known, nothing above applies |
+| Unknown / incomplete evidence | anything the answer depends on could not be read |
+
+## Worktree claims
+
+A claim is a small local file saying which session is working in a worktree. Git enforces it:
+after `setup`, a commit (or merge commit) fails when
+
+- the worktree is claimed by a different session, in any state, or
+- the branch is issue work (`type/avr-N-...`) and nobody has claimed the worktree.
+
+The error names the owner and the way out. A stale claim (no activity for 6 hours) can be
+re-claimed by anyone if the worktree is clean; with uncommitted changes or a merge or rebase in
+progress it needs `claim --force`, which is the owner's call. `git commit --no-verify` remains
+the human override.
+
+Identity is an opaque label. Claude Code sessions get `claude-<8 characters>` automatically.
+Everything else sets one: `AI_WORKFLOW_SESSION=codex-1a2b3c4d`, or `start --agent codex --session
+<id>`. A person committing on an issue branch needs one too (for example
+`AI_WORKFLOW_SESSION=human-cody`). No names, secrets or process ids go into claims.
 
 ## Linear
 
-With `LINEAR_API_KEY` in the environment the CLI reads Linear directly (never store the key in a
-repository). Without it, an agent that has a Linear connector writes what it read to a JSON file
-and passes `--linear-snapshot file.json` (one issue, a list, or `{"issues": [...]}` in the
-connector's own shape). With neither, Linear is reported unavailable and no issue is called ready.
+Direct, read-only. The token is looked up in this order and never written anywhere:
 
-## Claude Code hook (optional, owner installs)
+1. environment variable `LINEAR_API_KEY`
+2. the OS secret store, entry `ai-workflow-linear`
 
-To have Claude sessions claim on first edit and stop before editing another session's worktree,
-add to the user-level `~/.claude/settings.json`:
+```sh
+cmdkey /generic:ai-workflow-linear /user:linear /pass:<token>                          # Windows
+security add-generic-password -s ai-workflow-linear -a linear -w                       # macOS (prompts)
+secret-tool store --label="AI-workflow Linear" service ai-workflow-linear              # Linux (prompts)
+```
+
+Minimum scope: a personal API key with **Read** permission only, limited to the team that owns
+the issues. The tool sends queries, never mutations.
+
+Without a token, pass `--linear-snapshot file.json` (issues as a Linear connector returns them:
+one issue, a list, or `{"issues": [...]}`). With neither, Linear is `unavailable` and no issue is
+called ready.
+
+## GitHub and the appliance
+
+GitHub is read through `gh` (`gh auth login`). The deployed build is read from the appliance's
+status endpoint (`status_url`), which answers only on its own network. Either being unreachable
+is reported as unavailable in every command; it is never read as "no PRs" or "deployed".
+
+## Optional: earlier warning in Claude Code
+
+Git is the enforcement. For a warning before the edit instead of at the commit, add to your
+user-level Claude Code settings:
 
 ```json
 {"hooks": {"PreToolUse": [{"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
-  "hooks": [{"type": "command", "command": "python C:/Users/<you>/Projects/avrana-workflow/aw.py guard", "timeout": 15}]}]}}
+  "hooks": [{"type": "command", "command": "python <path to>/AI-workflow/aw.py guard", "timeout": 15}]}]}}
 ```
-
-It does nothing outside the configured repositories and never blocks on its own failure.
 
 ## Tests
 
@@ -62,5 +135,5 @@ It does nothing outside the configured repositories and never blocks on its own 
 python -m unittest discover -s tests
 ```
 
-The tests build temporary Party and Games checkouts with real git; GitHub, Linear and the Pi are
-faked or pointed at a closed port.
+The tests build temporary checkouts with real git, real hooks and real commits. GitHub, Linear
+and the appliance are faked.

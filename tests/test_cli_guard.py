@@ -2,33 +2,16 @@ import contextlib
 import io
 import json
 import os
+import subprocess
+import sys
 import unittest
 
-from support import READY, RepoCase, git, issue
+from support import (GAMES_ONLY, PARTY_ONLY, READY, ROOT, UNDECIDED, RepoCase, git, issue, pr, run)
 
-from avrana_workflow import claims, cli, gitio, guard, sources
-
-
-class Offline:
-    """No GitHub, no Linear, no Pi: the CLI must still answer and say what it could not read."""
-    prs = staticmethod(lambda repo, slug, issue=None: sources.unavailable(f'gh failed for {slug} (offline)'))
-    linear = staticmethod(lambda issue=None, snapshot=None: sources.linear(issue, snapshot=snapshot))
-    pi_status = staticmethod(lambda url: sources.unavailable(f'{url} unreachable (offline)'))
+from ai_workflow import claims, gitio, guard
 
 
-def run(*argv):
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cli.main(list(argv))
-    return code, out.getvalue(), err.getvalue()
-
-
-class CliTests(RepoCase):
-    def setUp(self):
-        super().setUp()
-        self._sources, cli.SOURCES = cli.SOURCES, Offline
-        self.addCleanup(setattr, cli, 'SOURCES', self._sources)
-
+class ClaimCliTests(RepoCase):
     def test_claiming_an_issue_claims_its_worktree_in_both_repositories(self):
         self.add_worktree('party', 'feat/avr-900-x', 'avrana-party.wt-avr900')
         self.add_worktree('games', 'feat/avr-900-x', 'avrana-party-games.wt-avr900')
@@ -38,9 +21,8 @@ class CliTests(RepoCase):
         code, out, _ = run('claim', 'avr-900', '--owner', 'codex-bbbb')
         self.assertEqual(code, 3)
         self.assertIn('claude-aaaa', out)
-        code, out, _ = run('status', '--json')
         owners = {t['path'].replace('\\', '/').rsplit('/', 1)[-1]: (t['claim'] or {}).get('owner')
-                  for r in json.loads(out)['repos'].values() for t in r['data']}
+                  for r in json.loads(run('status', '--json')[1])['repos'].values() for t in r['data']}
         self.assertEqual(owners, {'avrana-party': None, 'avrana-party.wt-avr900': 'claude-aaaa',
                                   'avrana-party-games': None, 'avrana-party-games.wt-avr900': 'claude-aaaa'})
 
@@ -57,38 +39,158 @@ class CliTests(RepoCase):
         self.add_worktree('party', 'feat/avr-900-x', 'avrana-party.wt-avr900')
         code, _, err = run('claim', 'AVR-900')
         self.assertEqual(code, 2)
-        self.assertIn('AVRANA_SESSION', err)
+        self.assertIn('AI_WORKFLOW_SESSION', err)
         os.environ['CLAUDE_CODE_SESSION_ID'] = '8cf0d847-ee34-418b'
         self.assertIn('claude-8cf0d847', run('claim', 'AVR-900')[1])
 
-    def test_worktree_creates_a_dedicated_claimed_worktree_from_origin_main(self):
-        code, out, _ = run('worktree', 'AVR-900', '--repo', 'both', '--type', 'feat', '--desc', 'registry', '--owner', 'claude-aaaa', '--json')
-        self.assertEqual(code, 0, out)
-        rows = json.loads(out)['results']
-        self.assertEqual([(r['created'], r['code'], r['branch']) for r in rows], [(True, 'claimed', 'feat/avr-900-registry')] * 2)
-        self.assertTrue((self.root / 'avrana-party.wt-avr900' / 'README.md').exists())
-        self.assertEqual(git(self.root / 'avrana-party.wt-avr900', 'rev-parse', 'HEAD'), git(self.repo('party'), 'rev-parse', 'origin/main'))
-        # a second session asking for the same issue is shown the existing worktree and refused
-        code, out, _ = run('worktree', 'AVR-900', '--repo', 'party', '--owner', 'codex-bbbb', '--json')
-        self.assertEqual(code, 3)
-        self.assertEqual((json.loads(out)['results'][0]['created'], json.loads(out)['results'][0]['code']), (False, 'refused-held'))
+    def test_separate_processes_racing_for_one_worktree_have_one_winner(self):
+        wt = self.add_worktree('party', 'feat/avr-900-x', 'avrana-party.wt-avr900')
+        procs = [subprocess.Popen([sys.executable, str(ROOT / 'aw.py'), 'claim', '--path', str(wt), '--owner', f'agent-{i}'],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for i in range(6)]
+        codes = [p.wait() for p in procs]
+        for p in procs:
+            p.stdout.close()
+            p.stderr.close()
+        self.assertEqual(sorted(codes), [0, 3, 3, 3, 3, 3])
+        self.assertEqual(claims.state(claims.read(claims.claim_file(gitio.common_dir(wt), wt))), 'held')
 
-    def test_issue_and_queue_report_every_unavailable_source(self):
-        code, out, _ = run('issue', 'AVR-900', '--json')
-        ctx = json.loads(out)
+
+class StartTests(RepoCase):
+    def start(self, *extra, ident='AVR-900', owner='claude-aaaa'):
+        code, out, err = run('start', ident, '--owner', owner, '--json', *extra)
+        return code, json.loads(out) if out.strip() else err
+
+    def test_single_repository_issue_end_to_end(self):
+        self.world(issues=[issue('AVR-900', description=PARTY_ONLY, title='Build the generic native-game registry, routing & provisioning')])
+        code, doc = self.start()
+        self.assertEqual(code, 0, doc)
+        self.assertEqual((doc['started'], doc['task']), (True, 'Implement AVR-900'))
+        [w] = doc['workspaces']
+        self.assertEqual((w['repo'], w['branch'], w['action'], w['claim']),
+                         ('party', 'feat/avr-900-build-the-generic-native-game', 'create', 'claimed'))
+        wt = self.root / 'avrana-party.wt-avr900'
+        self.assertEqual(git(wt, 'rev-parse', 'HEAD'), git(self.repo('party'), 'rev-parse', 'origin/main'))
+        self.assertEqual(claims.read(claims.claim_file(gitio.common_dir(wt), wt))['owner'], 'claude-aaaa')
+        self.assertFalse((self.root / 'avrana-party-games.wt-avr900').exists())
+        self.assertEqual(doc['context']['linear']['sections']['Acceptance Criteria'], '- y')
+        self.assertEqual(git(wt, 'config', '--get', 'branch.feat/avr-900-build-the-generic-native-game.merge') if False else '', '')
+
+    def test_paired_issue_gets_the_same_branch_in_both_repositories(self):
+        self.world(issues=[issue('AVR-900', description=READY, labels=['Bug'])])
+        code, doc = self.start('--desc', 'envelope')
+        self.assertEqual(code, 0, doc)
+        self.assertEqual([(w['repo'], w['branch'], w['claim']) for w in doc['workspaces']],
+                         [('games', 'fix/avr-900-envelope', 'claimed'), ('party', 'fix/avr-900-envelope', 'claimed')])
+
+    def test_start_with_agent_and_session(self):
+        self.world(issues=[issue('AVR-900', description=GAMES_ONLY)])
+        code, out, _ = run('start', 'AVR-900', '--agent', 'codex', '--session', '1a2b3c4d-9999-ffff', '--json')
+        self.assertEqual((code, json.loads(out)['owner']), (0, 'codex-1a2b3c4d'))
+
+    def test_existing_worktree_is_found_not_recreated_and_the_owner_resumes(self):
+        self.world(issues=[issue('AVR-900', description=PARTY_ONLY)])
+        self.assertEqual(self.start()[0], 0)
+        code, doc = self.start()
+        self.assertEqual((code, doc['workspaces'][0]['action'], doc['workspaces'][0]['claim']), (0, 'reuse', 'refreshed'))
+        self.assertEqual(len(gitio.worktrees(self.repo('party'))), 2)
+
+    def test_a_second_session_is_refused_and_nothing_is_created(self):
+        self.world(issues=[issue('AVR-900', description=READY)])
+        self.assertEqual(self.start()[0], 0)
+        code, doc = self.start(owner='codex-bbbb')
+        self.assertEqual((code, doc['started']), (3, False))
+        self.assertIn('claimed by claude-aaaa', doc['refused'])
+
+    def test_existing_unmerged_remote_branch_is_checked_out_not_duplicated(self):
+        other = self.add_worktree('party', 'feat/avr-900-earlier', 'tmp-wt')
+        (other / 'work.md').write_text('earlier\n', encoding='utf-8')
+        git(other, 'add', 'work.md')
+        git(other, 'commit', '-q', '-m', 'earlier work')
+        git(other, 'push', '-q', 'origin', 'feat/avr-900-earlier')
+        git(self.repo('party'), 'worktree', 'remove', str(other))
+        git(self.repo('party'), 'branch', '-D', 'feat/avr-900-earlier')
+        self.world(issues=[issue('AVR-900', state='In Progress', description=PARTY_ONLY)])
+        code, doc = self.start()
+        self.assertEqual(code, 0, doc)
+        self.assertEqual((doc['workspaces'][0]['action'], doc['workspaces'][0]['branch']), ('checkout', 'feat/avr-900-earlier'))
+        self.assertTrue((self.root / 'avrana-party.wt-avr900' / 'work.md').exists())
+
+    def test_existing_open_pr_means_the_issue_is_not_started_again(self):
+        self.world(issues=[issue('AVR-900', description=PARTY_ONLY)], party=[pr('party', 12, 'feat/avr-900-x')])
+        code, doc = self.start()
+        self.assertEqual((code, doc['context']['readiness']['state']), (3, 'pr-ci'))
+        self.assertEqual(len(gitio.worktrees(self.repo('party'))), 1)
+
+    def test_refusals_create_nothing(self):
+        cases = [([issue('AVR-900', description=UNDECIDED)], 3, 'needs-cody'),
+                 ([issue('AVR-900', description=READY, blocked_by=['AVR-1']), issue('AVR-1', state='In Progress')], 3, 'blocked'),
+                 ([issue('AVR-900', state='Done', description=READY)], 3, 'done'),
+                 ([issue('AVR-900', state='Backlog', description=READY)], 3, 'needs-cody'),
+                 ([issue('AVR-900', description='## Outcome\nno template')], 4, 'unknown'),
+                 (None, 4, 'unknown')]
+        for issues, want, state in cases:
+            self.world(issues=issues)
+            code, doc = self.start()
+            self.assertEqual((code, doc['context']['readiness']['state'], doc['started']), (want, state, False), issues)
+        self.assertEqual(len(gitio.worktrees(self.repo('party'))) + len(gitio.worktrees(self.repo('games'))), 2)
+
+    def test_dry_run_plans_but_fetches_creates_and_claims_nothing(self):
+        self.world(issues=[issue('AVR-900', description=READY)], fetch=False)          # a dry run never needs the fetch
+        code, doc = self.start('--dry-run')
+        self.assertEqual((code, doc['started'], doc['dry_run']), (0, False, True))
+        self.assertEqual([(w['repo'], w['action'], w['branch']) for w in doc['workspaces']],
+                         [('games', 'create', 'feat/avr-900-avr-900-title'), ('party', 'create', 'feat/avr-900-avr-900-title')])
+        for name in ('party', 'games'):
+            self.assertEqual(len(gitio.worktrees(self.repo(name))), 1)
+            self.assertEqual(git(self.repo(name), 'branch', '--list', '*avr-900*'), '')
+            self.assertFalse((self.repo(name) / '.git' / 'ai-workflow').exists())
+        self.world(issues=[issue('AVR-900', description=UNDECIDED)])
+        code, doc = self.start('--dry-run')
+        self.assertEqual((code, doc['started']), (3, False))
+
+    def test_owner_supplied_repo_and_decisions_unblock_an_untemplated_issue(self):
+        self.world(issues=[issue('AVR-900', description='## Outcome\nno template')])
+        code, doc = self.start('--repo', 'games', '--decisions-confirmed')
+        self.assertEqual((code, [w['repo'] for w in doc['workspaces']]), (0, ['games']))
+
+    def test_unavailable_github_or_stale_main_refuses(self):
+        self.world(issues=[issue('AVR-900', description=PARTY_ONLY)], fail={'o/avrana-party'})
+        self.assertEqual(self.start()[0], 4)
+        self.world(issues=[issue('AVR-900', description=PARTY_ONLY)], fetch=False)
+        code, doc = self.start()
+        self.assertEqual(code, 4)
+        self.assertIn('stale main', doc['refused'])
+        self.assertEqual(len(gitio.worktrees(self.repo('party'))), 1)
+
+    def test_issue_command_changes_nothing(self):
+        self.world(issues=[issue('AVR-900', description=READY)])
+        code, out, _ = run('issue', 'AVR-900')
         self.assertEqual(code, 0)
-        self.assertFalse(ctx['ready'])
+        self.assertIn('Ready for Agent - an agent may start', out)
+        self.assertEqual(len(gitio.worktrees(self.repo('party'))), 1)
+
+    def test_everything_unavailable_is_said_so(self):
+        ctx = json.loads(run('issue', 'AVR-900', '--json')[1])
+        self.assertEqual({u['source'] for u in ctx['unavailable']}, {'linear', 'pi'})
+        self.world(fail={'o/avrana-party', 'o/avrana-party-games'})
+        ctx = json.loads(run('issue', 'AVR-900', '--json')[1])
         self.assertEqual({u['source'] for u in ctx['unavailable']}, {'linear', 'github:party', 'github:games', 'pi'})
-        code, out, _ = run('needs-cody', '--json')
-        self.assertEqual({u['source'] for u in json.loads(out)['unavailable']}, {'linear', 'github:party', 'github:games', 'pi'})
+        self.assertEqual({u['source'] for u in json.loads(run('needs-cody', '--json')[1])['unavailable']},
+                         {'linear', 'github:party', 'github:games', 'pi'})
         self.assertEqual(run('prs', 'AVR-900')[0], 4)
 
-    def test_linear_snapshot_from_a_connector(self):
+    def test_linear_snapshot_fallback(self):
         snap = self.root / 'snap.json'
         snap.write_text(json.dumps({'issues': [issue('AVR-900', description=None), issue('AVR-900', description=READY)]}), encoding='utf-8')
         ctx = json.loads(run('issue', 'AVR-900', '--linear-snapshot', str(snap), '--json')[1])
-        self.assertEqual(ctx['linear']['open_decisions'], 'none')
-        self.assertNotIn('linear', {u['source'] for u in ctx['unavailable']})
+        self.assertEqual((ctx['linear']['open_decisions'], ctx['readiness']['state']), ('none', 'ready-for-agent'))
+
+    def test_needs_cody_text_has_the_three_sections(self):
+        self.world(issues=[issue('AVR-10', description=UNDECIDED)], party=[pr('party', 3, 'fix/avr-3-c', checks=[('IN_PROGRESS', '')])])
+        out = run('needs-cody')[1]
+        self.assertIn('Needs Cody now (1)', out)
+        self.assertIn('Agent work in progress (1)', out)
+        self.assertIn('Could not check (1)', out)
 
 
 class GuardTests(RepoCase):

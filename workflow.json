@@ -1,5 +1,6 @@
 {
-  "schema": "avrana.workflow-config/v1",
+  "schema": "ai-workflow.config/v1",
+  "issue_prefix": "AVR",
   "repos": {
     "party": {"slug": "rcnechamkin/avrana-party", "dir": "avrana-party"},
     "games": {"slug": "rcnechamkin/avrana-party-games", "dir": "avrana-party-games"}

@@ -68,7 +68,7 @@ def evaluate(payload, cfg, now=None):
             continue
         rc, branch = gitio.git(top, 'branch', '--show-current')
         got = claims.acquire(file, top, owner, agent='claude', issue=gitio.issue_of(branch), branch=branch or None,
-                             repo=commons[claims.norm(common)], ttl_hours=cfg.get('claim_ttl_hours', claims.DEFAULT_TTL_HOURS),
+                             repo=commons[claims.norm(common)], ttl_hours=model.ttl(cfg),
                              now=now, busy=lambda top=top: gitio.busy(top))
         if not got.ok:
             return 'ask', (f'worktree {top} is {got.message} Two sessions in one worktree is how conflict markers got '

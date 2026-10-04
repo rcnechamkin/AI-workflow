@@ -5,7 +5,7 @@ import unittest
 
 from support import RepoCase, git
 
-from avrana_workflow import claims, gitio
+from ai_workflow import claims, gitio
 
 
 class ClaimTests(RepoCase):
