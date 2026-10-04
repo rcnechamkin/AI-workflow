@@ -134,6 +134,20 @@ class StartTests(RepoCase):
             self.assertEqual((code, doc['context']['readiness']['state'], doc['started']), (want, state, False), issues)
         self.assertEqual(len(gitio.worktrees(self.repo('party'))) + len(gitio.worktrees(self.repo('games'))), 2)
 
+    def test_dry_run_plans_but_fetches_creates_and_claims_nothing(self):
+        self.world(issues=[issue('AVR-900', description=READY)], fetch=False)          # a dry run never needs the fetch
+        code, doc = self.start('--dry-run')
+        self.assertEqual((code, doc['started'], doc['dry_run']), (0, False, True))
+        self.assertEqual([(w['repo'], w['action'], w['branch']) for w in doc['workspaces']],
+                         [('games', 'create', 'feat/avr-900-avr-900-title'), ('party', 'create', 'feat/avr-900-avr-900-title')])
+        for name in ('party', 'games'):
+            self.assertEqual(len(gitio.worktrees(self.repo(name))), 1)
+            self.assertEqual(git(self.repo(name), 'branch', '--list', '*avr-900*'), '')
+            self.assertFalse((self.repo(name) / '.git' / 'ai-workflow').exists())
+        self.world(issues=[issue('AVR-900', description=UNDECIDED)])
+        code, doc = self.start('--dry-run')
+        self.assertEqual((code, doc['started']), (3, False))
+
     def test_owner_supplied_repo_and_decisions_unblock_an_untemplated_issue(self):
         self.world(issues=[issue('AVR-900', description='## Outcome\nno template')])
         code, doc = self.start('--repo', 'games', '--decisions-confirmed')

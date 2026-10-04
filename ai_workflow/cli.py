@@ -188,7 +188,8 @@ def cmd_start(args, cfg):
     owner, agent = need_owner(args)
     if not owner:
         return 2
-    fetched = {name: SOURCES.fetch_main(repo['path']) for name, repo in cfg['repos'].items()}
+    # a dry run changes nothing, not even remote-tracking refs: it plans against origin/main as last fetched
+    fetched = {name: args.dry_run or SOURCES.fetch_main(repo['path']) for name, repo in cfg['repos'].items()}
     linear, prs, pi = gather(cfg, issue, args)
     ws = model.workspace(cfg)
     ctx = model.issue_context(cfg, issue, ws, linear, prs, pi, me=owner, repos_override=repo_list(args, cfg),
@@ -218,6 +219,15 @@ def cmd_start(args, cfg):
             return refuse(3, why)
         plans[name] = plan
         adopt = adopt or plan[2]
+    if args.dry_run:
+        doc['dry_run'] = True
+        out = context_lines(ctx)
+        for name, (action, path, branch) in plans.items():
+            doc['workspaces'].append({'repo': name, 'path': path, 'branch': branch, 'action': action, 'claim': 'not claimed (dry run)'})
+            out.append(f'  Would     {name}: {action} {path} [{branch}] from origin/main {str(ctx["main"].get(name))[:12]} (as last fetched), then claim it for {owner}')
+        out.append(f'  => dry run: nothing fetched, created or claimed. Task would be: Implement {issue}')
+        emit(args, doc, chr(10).join(out))
+        return 0
     claimed = []
     for name, (action, path, branch) in plans.items():
         repo = cfg['repos'][name]
@@ -412,6 +422,7 @@ def main(argv=None):
     p.add_argument('--type', choices=['feat', 'fix', 'chore', 'docs', 'experiment'], help='branch type (default: from labels)')
     p.add_argument('--desc', help='branch description (default: from the title)')
     p.add_argument('--note', default='')
+    p.add_argument('--dry-run', action='store_true', help='readiness and the plan only: fetch, create and claim nothing')
     p.add_argument('--decisions-confirmed', action='store_true',
                    help='the OWNER states there are no open product decisions although the issue does not say so')
     for name in ('claim', 'release', 'handoff'):
