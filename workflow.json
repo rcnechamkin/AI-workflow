@@ -1,0 +1,9 @@
+{
+  "schema": "avrana.workflow-config/v1",
+  "repos": {
+    "party": {"slug": "rcnechamkin/avrana-party", "dir": "avrana-party"},
+    "games": {"slug": "rcnechamkin/avrana-party-games", "dir": "avrana-party-games"}
+  },
+  "status_url": "https://party.avrana.net/party/api/status",
+  "claim_ttl_hours": 6
+}
