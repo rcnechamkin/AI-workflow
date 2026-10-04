@@ -205,6 +205,13 @@ def _why(reply):
         return ''
 
 
+def stdin_text(stream=None):
+    """Standard input as UTF-8 text: a Windows console's codepage must not mangle a piped snapshot."""
+    stream = stream or sys.stdin
+    raw = getattr(stream, 'buffer', None)
+    return raw.read().decode('utf-8-sig') if raw is not None else stream.read()
+
+
 def linear(issue=None, snapshot=None, token=None, graphql=_graphql, find_token=tokens.linear_token):
     """{id: issue}: one issue when `issue` is given, else every unstarted/started issue.
 
@@ -216,7 +223,7 @@ def linear(issue=None, snapshot=None, token=None, graphql=_graphql, find_token=t
     if snapshot:
         label = 'snapshot on stdin' if snapshot == '-' else f'snapshot {Path(snapshot).name}'
         try:
-            return {**ok(parse_snapshot(sys.stdin.read()) if snapshot == '-' else load_snapshot(snapshot)), 'origin': label}
+            return {**ok(parse_snapshot(stdin_text()) if snapshot == '-' else load_snapshot(snapshot)), 'origin': label}
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             return unavailable(f'Linear {label} unreadable ({type(e).__name__})')
     where = 'given token'

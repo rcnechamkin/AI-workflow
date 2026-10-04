@@ -124,5 +124,22 @@ class TokenTests(unittest.TestCase):
         self.assertIsNone(tokens._store('ai-workflow-test-entry-that-does-not-exist', 'win32'))
 
 
+class StdinEncodingTests(unittest.TestCase):
+    def test_a_snapshot_on_stdin_is_read_as_utf8_whatever_the_console_encoding(self):
+        import io
+        from ai_workflow import sources
+
+        class Console:                                            # a Windows console: text layer in a legacy codepage
+            def __init__(self, raw):
+                self.buffer = io.BytesIO(raw)
+
+            def read(self):
+                return self.buffer.getvalue().decode('cp1252', 'replace')
+
+        raw = json.dumps({'id': 'AVR-900', 'title': 'Route \u2026 caf\u00e9', 'description': 'x'}, ensure_ascii=False).encode('utf-8')
+        self.assertEqual(sources.stdin_text(Console(b'\xef\xbb\xbf' + raw)), raw.decode('utf-8'))
+        self.assertEqual(sources.stdin_text(io.StringIO('plain')), 'plain')   # a text-only stream is used as it is
+
+
 if __name__ == '__main__':
     unittest.main()
