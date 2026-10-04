@@ -266,6 +266,69 @@ class BudgetAndFailureTests(ContextCase):
         self.assertGreater(engine['tokens'], context.ITEM_COST_CAP)               # the true size is still reported
         self.assertLessEqual(m['budget']['tokens'], context.MAX_TOKENS)
 
+    def test_a_dotted_name_resolves_to_the_file_that_defines_the_class_and_the_member(self):
+        self.seed('games', {'games/expo/engine.py': 'class Engine:\n    def apply(self, cmd):\n        return cmd\n',
+                            'games/bluff/engine.py': 'class Engine:\n    def other(self):\n        return 1\n'}, 'engine class')
+        m = self.manifest(description='## Outcome\n\n`Engine.apply` refuses every command.\n\n## Repositories\n\navrana-party-games\n')
+        self.assertEqual(m['status'], 'ok', m['warnings'])
+        self.assertEqual(self.item(m, 'games/expo/engine.py')['tier'], 1)
+        self.assertIn('`Engine.apply`', self.item(m, 'games/expo/engine.py')['why'])
+        self.assertNotIn('games/bluff/engine.py', [i['ref'] for i in m['items'] if i['tier'] == 1])
+        self.assertFalse(any('`Engine.apply`' in w and 'not found' in w for w in m['warnings']), m['warnings'])
+
+    def test_a_directory_the_issue_names_is_not_reported_missing(self):
+        m = self.manifest(description=ISSUE + '\nCommit them under `games/expo/docs/` or not; never `games/nowhere/`.\n')
+        self.assertFalse(any('`games/expo/docs/`' in w for w in m['warnings']), m['warnings'])
+        self.assertTrue(any('`games/nowhere/`' in w and 'not found' in w for w in m['warnings']), m['warnings'])
+        self.assertFalse(any(i['ref'] == 'games/expo/docs' for i in m['items']))
+
+    def test_a_named_directory_alone_does_not_make_the_context_sufficient(self):
+        m = self.manifest(description='## Outcome\n\nPut drafts under `games/expo/docs/`.\n\n## Repositories\n\navrana-party-games\n')
+        self.assertEqual(m['status'], 'insufficient')
+
+    def test_tests_are_matched_by_the_package_before_the_file_stem(self):
+        self.seed('games', {'games/expo/rules.py': 'def legal_cards():\n    return []\n',
+                            'tests/test_bluff_rules_audit.py': 'def test_audit():\n    assert True\n'}, 'rules')
+        m = self.manifest(description=ISSUE + '\nSee `games/expo/rules.py`.\n')
+        refs = [i['ref'] for i in m['items']]
+        self.assertIn('tests/test_expo_rules.py', refs)
+        self.assertNotIn('tests/test_bluff_rules_audit.py', refs)                 # another game's test that shares only the stem
+
+    def test_a_generic_package_falls_back_to_the_file_stem(self):
+        self.seed('games', {'core/session.py': 'def launch_session():\n    return 1\n',
+                            'tests/test_party_session.py': 'def test_s():\n    assert True\n'}, 'session')
+        m = self.manifest(description=ISSUE + '\nSee `core/session.py`.\n')
+        self.assertIn('tests/test_party_session.py', [i['ref'] for i in m['items']])
+
+    def test_an_identifier_found_inside_the_named_area_does_not_pull_in_other_areas(self):
+        self.seed('games', {'games/expo/tasks.py': 'KIND = "majority_vote"\n', 'games/pricecheck/items.py': 'X = "majority_vote"\n',
+                            'games/wordrush/data/words.txt': 'majority_vote\n'}, 'shared word')
+        m = self.manifest(description='## Outcome\n\nCover `majority_vote` per `games/expo/docs/ACTIONS.md`.\n\n## Repositories\n\navrana-party-games\n')
+        refs = [i['ref'] for i in m['items']]
+        self.assertIn('games/expo/tasks.py', refs)
+        self.assertNotIn('games/pricecheck/items.py', refs)
+        self.assertNotIn('games/wordrush/data/words.txt', refs)
+
+    def test_tests_of_other_areas_are_dropped_when_the_named_area_has_its_own(self):
+        self.seed('games', {'games/expo/tasks.py': 'KIND = "majority_vote"\n', 'tests/test_expo_tasks.py': 'K = "majority_vote"\n',
+                            'tests/test_bluff_security.py': 'K = "majority_vote"\n'}, 'shared word in tests')
+        m = self.manifest(description='## Outcome\n\nCover `majority_vote` per `games/expo/docs/ACTIONS.md`.\n\n## Repositories\n\navrana-party-games\n')
+        refs = [i['ref'] for i in m['items']]
+        self.assertIn('tests/test_expo_tasks.py', refs)
+        self.assertNotIn('tests/test_bluff_security.py', refs)
+
+    def test_a_host_name_is_not_a_class_member(self):
+        self.seed('games', {'web/app.js': 'const games = 1; // net\n'}, 'host words')
+        m = self.manifest(description=ISSUE + '\nServed from `games.avrana.net`.\n')
+        self.assertNotIn('web/app.js', [i['ref'] for i in m['items'] if i['tier'] == 1])
+
+    def test_a_data_file_is_never_an_exact_code_match(self):
+        self.seed('games', {'games/wordrush/data/words.txt': 'rare_token_xyz\n', 'games/wordrush/game.py': 'W = "rare_token_xyz"\n'}, 'data')
+        m = self.manifest(description=ISSUE + '\nAlso `rare_token_xyz`.\n')
+        refs = [i['ref'] for i in m['items']]
+        self.assertIn('games/wordrush/game.py', refs)
+        self.assertNotIn('games/wordrush/data/words.txt', refs)
+
     def test_undetermined_repositories_build_nothing(self):
         m = self.manifest(repos=())
         self.assertEqual((m['status'], m['items']), ('insufficient', []))

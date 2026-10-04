@@ -5,9 +5,10 @@ needs. Every item says where it came from, how much authority it carries and why
 
 Retrieval order (the `tier` of an item; a file appears once, at its best tier):
 
-    1  explicit      a path, basename, ADR number or defined name written in the issue
+    1  explicit      a path, basename, ADR number or defined name (`name` or `Class.member`) written in the issue
     2  canonical     the repository entry point, and canonical docs/ADRs that mention what the issue names
-    3  exact         code and tests that contain an identifier the issue names, and tests named after that code
+    3  exact         code and tests that contain an identifier the issue names (code inside the area the issue
+                     names, when the identifier occurs there), and tests named after that code
     4  graphify      files a Graphify node points at: a lead, verified to exist, never an authority
     5  search        files matching several title words: inferred, last, and only if anything above was found
 
@@ -36,6 +37,8 @@ GENERIC = {'src', 'lib', 'games', 'tests', 'test', 'web', 'core', 'docs', 'tools
 STOP = {'about', 'after', 'again', 'before', 'being', 'between', 'could', 'every', 'first', 'their', 'there', 'these', 'those',
         'through', 'under', 'until', 'where', 'which', 'while', 'within', 'without', 'should', 'would', 'other', 'only'}
 CODE = ('.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.sh', '.html', '.css', '.go', '.rs')
+DATA = ('.txt', '.csv', '.tsv')                 # word lists and tables: never an exact code match
+MEMBER = r'[A-Z]\w*\.[a-z_]\w*'              # `Engine.apply`: a class and one of its members, not a host name
 KIND_ORDER = {'governing': 0, 'implementation': 1, 'test': 2}
 
 
@@ -163,7 +166,13 @@ def build(cfg, issue, repos, ws, prs=(), max_items=MAX_ITEMS, max_tokens=MAX_TOK
     paths, names, adrs = references(f'{issue["title"]}\n{issue.get("description") or ""}')
 
     # tier 1: what the issue names
+    areas = set()                                            # (repo, directory) the issue points at: scopes tier 3
     for token in paths:
+        folder = token.rstrip('/')
+        inside = [co for co in targets.values() if folder and any(f.startswith(folder + '/') for f in co.sizes)]
+        if inside:                                           # a directory: a scope, not a thing to read
+            areas |= {(co.name, folder) for co in inside}
+            continue
         hits = [(co, token) for co in targets.values() if token in co.sizes]
         how = f'named in the issue (`{token}`)'
         if not hits:
@@ -171,6 +180,9 @@ def build(cfg, issue, repos, ws, prs=(), max_items=MAX_ITEMS, max_tokens=MAX_TOK
             how = f'named in the issue by basename (`{token}`)'
             if len(hits) > 1:
                 warn(f'`{token}` is ambiguous: {len(hits)} files have that name ({", ".join(f for _, f in hits[:5])}); all are listed')
+        if not hits and re.fullmatch(MEMBER, token):
+            names.append(token)                              # `Engine.apply` is a name, not a file called Engine.apply
+            continue
         if not hits:
             warn(f'`{token}` is named in the issue but not found at {", ".join(f"{c.name} {c.label}" for c in targets.values())}')
         for co, file in hits[:5]:
@@ -186,6 +198,16 @@ def build(cfg, issue, repos, ws, prs=(), max_items=MAX_ITEMS, max_tokens=MAX_TOK
         defined = [(co, f) for co in targets.values()
                    for f in co.grep(rf'(def|class|function|const|let|var|fn)\s+{re.escape(name)}\b', regex=True)]
         mentioned = [(co, f) for co in targets.values() for f in co.grep(name)]
+        if not defined and re.fullmatch(MEMBER, name):                      # `Class.member`: the file that defines one and contains the other
+            head, member = name.split('.')[0], name.rsplit('.', 1)[-1]
+            owners = [(co, f) for co in targets.values()
+                      for f in co.grep(rf'(def|class|function|const|let|var|fn)\s+{re.escape(head)}\b', regex=True)]
+            holds = {(co.name, f) for co in targets.values() for f in co.grep(member)}
+            dotted = [(co, f) for co, f in owners if (co.name, f) in holds]
+            for co, file in dotted[:3]:
+                add(co, file, 1, 'issue-reference', f'named in the issue: defines `{head}` and contains `{member}` (`{name}`)', score=2)
+            if dotted and not mentioned:
+                continue
         if not defined and not mentioned:
             warn(f'`{name}` is named in the issue but not found in {", ".join(targets)}')
             continue
@@ -210,18 +232,36 @@ def build(cfg, issue, repos, ws, prs=(), max_items=MAX_ITEMS, max_tokens=MAX_TOK
     anchors = [(co, f) for (repo, f), item in found.items() if item['tier'] == 1 and item['kind'] == 'implementation'
                for co in [targets.get(repo)] if co]
     near = {(co.name, f.rsplit('/', 1)[0]) for co, f in anchors}
+    for (repo, f), item in found.items():                    # the area the issue names: where its files and documents live
+        if item['tier'] == 1 and item['kind'] != 'test' and '/' in f:
+            folder = f.rsplit('/', 1)[0]
+            areas |= {(repo, folder)} | ({(repo, folder.rsplit('/', 1)[0])} if folder.endswith('/docs') else set())
+
+    def in_area(co, file):
+        return any(repo == co.name and file.startswith(folder + '/') for repo, folder in areas)
+
     for name, mentioned in live:
-        rows = [(co, f) for co, f in mentioned if not f.endswith('.md') and not f.startswith(DERIVED_DIRS)]
+        rows = [(co, f) for co, f in mentioned if not f.endswith(('.md',) + DATA) and not f.startswith(DERIVED_DIRS)]
+        if any(in_area(co, f) for co, f in rows if kind_of(f) != 'test'):          # found where the issue points: other areas are noise
+            leaves = {folder.rsplit('/', 1)[-1].lower() for _, folder in areas} - GENERIC
+            mine = [(co, f) for co, f in rows if kind_of(f) == 'test'
+                    and leaves & set(re.split(r'[^a-z0-9]+', f.rsplit('/', 1)[-1].lower()))]
+            rows = [(co, f) for co, f in rows if in_area(co, f) or (kind_of(f) == 'test' and ((co, f) in mine or not mine))]
         rows.sort(key=lambda r: ((r[0].name, r[1].rsplit('/', 1)[0]) not in near, r[1]))
         for co, file in rows[:5]:
             add(co, file, 3, 'test-match' if kind_of(file) == 'test' else 'code-match', f'contains `{name}`, which the issue names',
                 score=2 if (co.name, file.rsplit('/', 1)[0]) in near else 1)
     for co, source in anchors:
         folder = source.rsplit('/', 1)[0]
-        words = [w for w in (folder.rsplit('/', 1)[-1], source.rsplit('/', 1)[-1].split('.')[0]) if w.lower() not in GENERIC and len(w) > 2]
-        for file in co.sizes:
-            if kind_of(file) == 'test' and any(w.lower() in re.split(r'[^a-z0-9]+', file.rsplit('/', 1)[-1].lower()) for w in words):
-                add(co, file, 3, 'test-match', f'test file named after {folder} (where `{source}` lives)', score=0)
+        words = [w.lower() for w in (folder.rsplit('/', 1)[-1], source.rsplit('/', 1)[-1].split('.')[0])
+                 if '/' in source and w.lower() not in GENERIC and len(w) > 2]
+        tests = [f for f in co.sizes if kind_of(f) == 'test']
+        for word in words:                                   # the package first; the file's own name only when that finds nothing
+            named = [f for f in tests if word in re.split(r'[^a-z0-9]+', f.rsplit('/', 1)[-1].lower())]
+            for file in named:
+                add(co, file, 3, 'test-match', f'test file named after `{word}` (from `{source}`)', score=0)
+            if named:
+                break
 
     if not any(i['tier'] in (1, 3) for i in found.values()):
         manifest['status'] = 'insufficient'
