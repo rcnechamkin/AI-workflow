@@ -1,13 +1,14 @@
 """READY_FOR_PR, WIP limits, the release queue, merge sets and auto-merge eligibility. The tool
 classifies and reports; it never opens, merges or configures anything on GitHub."""
 import json
+import os
 import subprocess
 import unittest
 from unittest import mock
 
 from support import RepoCase, git, pr, run
 
-from ai_workflow import cli, queue, sources
+from ai_workflow import cli, model, queue, sources
 
 ON = sources.ok({'allow_auto_merge': True, 'required_checks': True})
 OFF = sources.ok({'allow_auto_merge': False, 'required_checks': False})
@@ -296,6 +297,113 @@ class AutoMergeEligibilityTests(QueueCase):
         code, doc = self.board()
         self.assertIsNone(doc['repos']['party']['auto_merge']['available'])
         self.assertTrue(any(u['source'] == 'github-settings:party' for u in doc['unavailable']))
+
+
+class RetroactiveTests(QueueCase):
+    """A PR opened before the queue existed gets its READY_FOR_PR record after the fact."""
+
+    def test_ready_on_a_branch_whose_pr_is_already_open_is_recorded_as_retroactive(self):
+        path = self.work('party', 'docs/avr-900-notes', 'wt900', ['docs/x.md'], 'claude-aaaa')
+        self.world(party=[pr('avrana-party', 64, 'docs/avr-900-notes', files=['docs/x.md'])], automerge={'party': ON, 'games': ON})
+        before = self.board()[1]['repos']['party']['open'][0]['auto_merge']
+        self.assertTrue(any('READY_FOR_PR' in r for r in before['reasons']))
+        code, out, _ = self.ready(path, 'claude-aaaa')
+        self.assertEqual(code, 0, out)
+        entry = json.loads(out)['results'][0]['ready']
+        self.assertEqual((entry['retroactive'], entry['pr']), (True, 64))
+        code, doc = self.board()
+        self.assertEqual([(e['state'], e['can_release']) for e in doc['queue']], [('pr-open', False)])
+        self.assertEqual(doc['repos']['party']['open'][0]['auto_merge'], {'eligible': True, 'reasons': []})
+
+    def test_the_text_says_the_pr_is_already_open_instead_of_do_not_open(self):
+        path = self.work('party', 'docs/avr-900-notes', 'wt900', ['docs/x.md'], 'claude-aaaa')
+        self.world(party=[pr('avrana-party', 64, 'docs/avr-900-notes', files=['docs/x.md'])])
+        code, out, _ = run('ready', '--path', str(path), '--owner', 'claude-aaaa', '--tests', 'docs check ok')
+        self.assertEqual(code, 0)
+        self.assertIn('party#64 is already open', out)
+        self.assertNotIn('Do not open', out)
+
+    def test_a_retroactive_record_still_declares_needs_cody(self):
+        path = self.work('party', 'docs/avr-900-notes', 'wt900', ['docs/x.md'], 'claude-aaaa')
+        self.world(party=[pr('avrana-party', 64, 'docs/avr-900-notes', files=['docs/x.md'])], automerge={'party': ON, 'games': ON})
+        self.ready(path, 'claude-aaaa', '--needs-cody')
+        am = self.board()[1]['repos']['party']['open'][0]['auto_merge']
+        self.assertEqual((am['eligible'], [r for r in am['reasons'] if 'Needs Cody' in r]), (False, ['Needs Cody']))
+
+    def test_when_github_cannot_be_read_the_record_is_ordinary_and_says_so(self):
+        path = self.work('party', 'docs/avr-900-notes', 'wt900', ['docs/x.md'], 'claude-aaaa')
+        self.world(fail=('o/avrana-party',))
+        code, out, _ = run('ready', '--path', str(path), '--owner', 'claude-aaaa', '--tests', 'ok')
+        self.assertEqual(code, 0)
+        self.assertIn('could not check', out)
+        self.assertIn('Do not open', out)
+
+
+class QueueOnlyRepoTests(QueueCase):
+    """A repository the queue tracks (the tool's own) without it becoming a product repository."""
+
+    def setUp(self):
+        super().setUp()
+        seed = self.root / 'seed-tool'
+        seed.mkdir()
+        git(seed, 'init', '-q', '-b', 'main')
+        (seed / 'README.md').write_text('tool\n', encoding='utf-8')
+        git(seed, 'add', '.')
+        git(seed, 'commit', '-q', '-m', 'init')
+        git(self.root, 'clone', '-q', '--bare', str(seed), 'origin-tool.git')
+        git(self.root, 'clone', '-q', str(self.root / 'origin-tool.git'), 'tool')
+        cfg_path = self.root / 'workflow.json'
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        cfg['queue_repos'] = {'workflow': {'slug': 'o/tool', 'dir': 'tool'}}
+        cfg_path.write_text(json.dumps(cfg), encoding='utf-8')
+        self.cfg = model.load_config(cfg_path, self.root)
+
+    def tool_work(self, branch, files, owner):
+        path = self.root / f'tool.wt-{branch.rsplit("/", 1)[-1]}'
+        git(self.root / 'tool', 'worktree', 'add', '-q', '--no-track', '-b', branch, str(path), 'origin/main')
+        for rel in files:
+            (path / rel).write_text('x\n', encoding='utf-8')
+        git(path, 'add', '-A')
+        git(path, 'commit', '-q', '-m', 'work')
+        self.assertEqual(run('claim', '--path', str(path), '--owner', owner)[0], 0)
+        return path
+
+    def test_its_open_prs_and_slots_appear_in_the_queue(self):
+        self.world(others={'o/tool': [pr('tool', 5, 'feat/merge-queue', files=['queue.py'])]})
+        code, doc = self.board()
+        self.assertEqual(code, 0)
+        self.assertEqual([p['number'] for p in doc['repos']['workflow']['open']], [5])
+        self.assertIn('workflow#5', run('queue')[1])
+
+    def test_ready_and_release_work_there_without_an_issue_id(self):
+        path = self.tool_work('feat/queue-followups', ['a.py'], 'claude-aaaa')
+        code, out, _ = self.ready(path, 'claude-aaaa')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)['results'][0]['repo'], 'workflow')
+        (entry,) = self.board()[1]['queue']
+        self.assertEqual((entry['repo'], entry['issue'], entry['state'], entry['can_release']), ('workflow', None, 'ready', True))
+        self.world(others={'o/tool': [pr('tool', 5, 'feat/other', files=['b.py'])]})
+        code, out, _ = run('queue', 'release', '--path', str(path), '--owner', 'gru')
+        self.assertEqual(code, 3)
+        self.assertIn('workflow#5', out)
+        self.world()
+        self.assertEqual(run('queue', 'release', '--path', str(path), '--owner', 'gru')[0], 0)
+
+    def test_an_agents_open_pr_there_counts_against_its_one_implementation_pr(self):
+        self.tool_work('feat/merge-queue', ['a.py'], 'claude-aaaa')
+        path = self.work('party', 'feat/avr-900-x', 'wt900', ['a.py'], 'claude-aaaa')
+        self.ready(path, 'claude-aaaa')
+        self.world(others={'o/tool': [pr('tool', 5, 'feat/merge-queue', files=['a.py'])]})
+        code, out, _ = run('queue', 'release', 'AVR-900', '--owner', 'gru')
+        self.assertEqual(code, 3)
+        self.assertIn('workflow#5', out)
+
+    def test_it_is_not_a_product_repository_anywhere_else(self):
+        self.assertEqual(sorted(json.loads(run('status', '--json')[1])['repos']), ['games', 'party'])
+        self.assertEqual(sorted(self.cfg['repos']), ['games', 'party'])
+        self.assertFalse((self.root / 'tool' / '.git' / 'hooks' / 'pre-commit').exists())
+        run('setup')
+        self.assertFalse((self.root / 'tool' / '.git' / 'hooks' / 'pre-commit').exists())
 
 
 class NoSideEffectTests(QueueCase):

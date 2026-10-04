@@ -121,9 +121,9 @@ NO_LINEAR = sources.unavailable('no LINEAR_API_KEY in the environment and no ai-
 NO_PI = sources.unavailable('http://127.0.0.1:9/status unreachable (URLError)')
 
 
-def world(issues=None, party=(), games=(), pi=NO_PI, fail=(), behind=None, fetch=True, automerge=None):
+def world(issues=None, party=(), games=(), pi=NO_PI, fail=(), behind=None, fetch=True, automerge=None, others=None):
     """The outside world for the CLI: Linear issues (None = unavailable), PR rows, Pi, fetch."""
-    runner = gh({'o/avrana-party': list(party), 'o/avrana-party-games': list(games)}, fail=fail, behind=behind)
+    runner = gh({'o/avrana-party': list(party), 'o/avrana-party-games': list(games), **(others or {})}, fail=fail, behind=behind)
 
     class World:
         prs = staticmethod(lambda repo, slug, issue=None: sources.prs(repo, slug, issue, run=runner))

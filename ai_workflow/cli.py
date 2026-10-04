@@ -366,6 +366,7 @@ def cmd_ready(args, cfg):
     owner, _ = need_owner(args)
     if not owner:
         return 2
+    cfg = model.queue_config(cfg)
     trees, err = resolve_trees(args, cfg)
     if err:
         print(err, file=sys.stderr)
@@ -387,8 +388,12 @@ def cmd_ready(args, cfg):
             code = 3
             continue
         tree = {'issue': issue, 'branch': branch, 'head': gitio.rev(path, 'HEAD')}
-        got = queue.record(file, owner, tree, args.tests, declared, args.set, queue.changed_files(path), cfg)
+        listed = SOURCES.prs(repo, cfg['repos'][repo]['slug']) if repo else None       # is a PR already open for this branch?
+        number = next((p['number'] for p in listed['data'] if p['state'] == 'open' and p['branch'] == branch), None) \
+            if listed and listed['available'] else None
+        got = queue.record(file, owner, tree, args.tests, declared, args.set, queue.changed_files(path), cfg, pr=number)
         results.append({'worktree': path, 'repo': repo, 'ok': got.ok, 'code': got.code, 'message': got.message,
+                        'pr_checked': bool(listed and listed['available']),
                         'ready': (got.claim or {}).get('ready') if got.ok else None})
         code = code or (0 if got.ok else 3)
     out = []
@@ -400,12 +405,15 @@ def cmd_ready(args, cfg):
             f'  touches  {e["files"]} file(s); {e["kind"]}' + (', docs-only' if e['docs_only'] else '')
             + (f'; {", ".join(e["classes"])}' if e['classes'] else '; no ADR, contract, deployment or Needs Cody')
             + (f'; merge set {e["set"]}' if e['set'] else ''),
-            '  Do not open the PR: the orchestrator releases it (`queue release`) when there is room.']
+            f'  {r["repo"]}#{e["pr"]} is already open: recorded retroactively; there is nothing to release.' if e.get('pr') else
+            ('' if r['pr_checked'] else '  could not check for an existing PR (GitHub unreadable).\n')
+            + '  Do not open the PR: the orchestrator releases it (`queue release`) when there is room.']
     emit(args, {'owner': owner, 'results': results}, '\n'.join(out))
     return code
 
 
 def queue_board(cfg):
+    cfg = model.queue_config(cfg)
     prs = {name: SOURCES.prs(name, repo['slug']) for name, repo in cfg['repos'].items()}
     settings = {name: SOURCES.automerge(name, repo['slug']) for name, repo in cfg['repos'].items()}
     return queue.board(cfg, model.workspace(cfg), prs, settings, lambda name, issue: SOURCES.prs(name, cfg['repos'][name]['slug'], issue))

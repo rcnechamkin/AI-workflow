@@ -228,12 +228,15 @@ def _sets(cfg, ws, ready, open_prs, history, unavailable):
     return out
 
 
-def record(file, owner, tree, tests, declared, set_name, files, cfg, now=None):
-    """Write READY_FOR_PR onto our own claim; returns the Outcome."""
+def record(file, owner, tree, tests, declared, set_name, files, cfg, now=None, pr=None):
+    """Write READY_FOR_PR onto our own claim; returns the Outcome. `pr` is the number of a PR that
+    is already open for the branch: the record is then retroactive and there is nothing to release."""
     c = classify(files, declared, cfg.get('classes'))
     ready = {'issue': tree['issue'], 'branch': tree['branch'], 'commit': tree['head'], 'tests': tests, 'kind': c['kind'],
              'docs_only': c['docs_only'], 'classes': c['classes'], 'declared': sorted(declared), 'files': len(files or []),
              'set': set_name, 'at': claims.stamp(now or claims.utcnow())}
+    if pr is not None:
+        ready.update(retroactive=True, pr=pr)
     return claims.annotate(file, owner, ready=ready)
 
 

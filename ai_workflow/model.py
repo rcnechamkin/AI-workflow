@@ -19,11 +19,17 @@ STATES = {'needs-cody': 'Needs Cody', 'blocked': 'Blocked', 'ready-for-agent': '
 def load_config(path=None, root=None):
     cfg = json.loads(Path(path or os.environ.get('AI_WORKFLOW_CONFIG') or ROOT / 'workflow.json').read_text(encoding='utf-8'))
     base = Path(root or os.environ.get('AI_WORKFLOW_ROOT') or ROOT.parent)
-    for repo in cfg['repos'].values():
+    for repo in list(cfg['repos'].values()) + list(cfg.get('queue_repos', {}).values()):
         repo['path'] = str(base / repo['dir'])
     cfg['root'] = str(base)
     gitio.set_prefix(cfg.get('issue_prefix', 'AVR'))
     return cfg
+
+
+def queue_config(cfg):
+    """The configuration the merge queue sees: the product repositories plus `queue_repos`, which
+    are tracked for PRs, slots and READY_FOR_PR only (never for start, readiness, hooks or status)."""
+    return {**cfg, 'repos': {**cfg['repos'], **cfg.get('queue_repos', {})}}
 
 
 def ttl(cfg):

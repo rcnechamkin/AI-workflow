@@ -169,6 +169,15 @@ ready. Each failing criterion is named. Separately, each repository reports whet
 auto-merge can work there at all (`allow_auto_merge` and required status checks on main), so a gap
 in repository settings is visible rather than assumed.
 
+A PR that was opened before its branch had a record gets one after the fact: run `ready` in its
+worktree as usual. The record is marked retroactive, names the open PR, and needs no release; it is
+what lets that PR's Needs Cody status be known.
+
+`queue_repos` in `workflow.json` lists repositories the queue tracks for PRs, slots and
+READY_FOR_PR without making them product repositories: this tool's own repository is one. They are
+not part of `start`, readiness, `status` or the commit hooks. Their branches carry no issue id, so
+release them with `queue release --path <worktree>`.
+
 The tool never opens or merges a PR, never enables auto-merge and never changes a repository
 setting. If GitHub cannot be read, nothing is released and the exit code is 4.
 

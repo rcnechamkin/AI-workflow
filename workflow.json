@@ -5,6 +5,9 @@
     "party": {"slug": "rcnechamkin/avrana-party", "dir": "avrana-party"},
     "games": {"slug": "rcnechamkin/avrana-party-games", "dir": "avrana-party-games"}
   },
+  "queue_repos": {
+    "workflow": {"slug": "rcnechamkin/AI-workflow", "dir": "AI-workflow"}
+  },
   "status_url": "https://party.avrana.net/party/api/status",
   "claim_ttl_hours": 6
 }
