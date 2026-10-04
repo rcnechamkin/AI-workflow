@@ -14,7 +14,7 @@ import urllib.request
 
 from . import gitio, tokens
 
-PR_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,mergedAt,reviewDecision,statusCheckRollup,mergeable'
+PR_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,mergedAt,reviewDecision,statusCheckRollup,mergeable,files'
 FAILED = {'FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'}
 PASSED = {'SUCCESS', 'SKIPPED', 'NEUTRAL'}
 SECTIONS = ('Outcome', 'Acceptance Criteria', 'Out of Scope', 'Repositories', 'Tests Required', 'Dependencies', 'Open Decisions')
@@ -62,7 +62,8 @@ def normalize_pr(repo, row):
             'ci': ci_state(row.get('statusCheckRollup')), 'review': row.get('reviewDecision') or None,
             'review_required': row.get('reviewDecision') == 'REVIEW_REQUIRED',
             'conflicting': {'CONFLICTING': True, 'MERGEABLE': False}.get(row.get('mergeable')),   # None: GitHub has not said
-            'behind_main': None}
+            'behind_main': None,
+            'files': [f.get('path') for f in row['files']] if isinstance(row.get('files'), list) else None}   # None: not reported
 
 
 def behind(slug, base, branch, run=_run):
@@ -92,6 +93,30 @@ def prs(repo, slug, issue=None, run=_run):
         if row['state'] == 'open' and row['branch']:
             row['behind_main'] = behind(slug, row['base'] or 'main', row['branch'], run)
     return ok(rows)
+
+
+def automerge(slug, run=_run):
+    """Whether GitHub auto-merge can work on `slug` at all: the repository setting, and required
+    status checks on main (branch protection or a ruleset). Read-only; a failure is unavailable."""
+    rc, out, err = run(['gh', 'api', f'repos/{slug}', '--jq', '.allow_auto_merge'])
+    if rc or out.strip() not in ('true', 'false'):
+        return unavailable(f'gh could not read the settings of {slug} ({((err or "").strip().splitlines() or ["no answer"])[-1]})')
+    allow, required = out.strip() == 'true', False
+    rc, out, err = run(['gh', 'api', f'repos/{slug}/branches/main/protection', '--jq', '.required_status_checks.contexts | length'])
+    if rc == 0:
+        required = out.strip().isdigit() and int(out.strip()) > 0
+    elif '404' not in (err or '') and 'not protected' not in (err or '').lower():
+        return unavailable(f'gh could not read the protection of {slug} main ({((err or "").strip().splitlines() or ["no answer"])[-1]})')
+    if not required:
+        rc, out, err = run(['gh', 'api', f'repos/{slug}/rules/branches/main'])
+        if rc == 0:
+            try:
+                required = any(r.get('type') == 'required_status_checks' for r in json.loads(out or '[]'))
+            except (ValueError, AttributeError, TypeError):
+                return unavailable(f'gh returned unreadable rules for {slug}')
+        elif '404' not in (err or ''):
+            return unavailable(f'gh could not read the rules of {slug} main ({((err or "").strip().splitlines() or ["no answer"])[-1]})')
+    return ok({'allow_auto_merge': allow, 'required_checks': required})
 
 
 # ---- Linear -------------------------------------------------------------------------------------

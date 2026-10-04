@@ -7,14 +7,16 @@ on, by whom, in which worktree, in what state, and what needs the owner.
     python aw.py context AVR-236                           what to read first, with provenance; changing nothing
     python aw.py status                                    every worktree: branch, issue, claim, drift, unfinished work
     python aw.py claim [AVR-236] | release | handoff --to X --note "..."
+    python aw.py ready [AVR-236] --tests "unit 40/40"      report READY_FOR_PR instead of opening a PR
+    python aw.py queue [release AVR-236]                   the merge queue, WIP limits, merge sets, auto-merge eligibility
     python aw.py prs [AVR-237]                             PRs, CI, review and pairing across repositories
     python aw.py needs-cody                                the owner's queue; agent work; what could not be checked
     python aw.py hook pre-commit                           what the installed git hooks run
     python aw.py guard                                     optional Claude Code PreToolUse hook (hook JSON on stdin)
 
 Options go after the command; `--json` gives every answer as data. Writes only local claim
-files, git hooks (setup) and new branches/worktrees (start). Never pushes, merges, deploys or
-writes to Linear or GitHub. Exit codes: 0 ok, 2 usage, 3 refused, 4 a required source was
+files, git hooks (setup) and new branches/worktrees (start). Never pushes, opens or merges a PR,
+enables auto-merge, changes a repository setting, deploys, or writes to Linear or GitHub. Exit codes: 0 ok, 2 usage, 3 refused, 4 a required source was
 unavailable.
 """
 import argparse
@@ -24,7 +26,7 @@ from pathlib import Path
 import re
 import sys
 
-from . import claims, context, gitio, guard, hooks, model, sources, tokens
+from . import claims, context, gitio, guard, hooks, model, queue, sources, tokens
 
 AW = Path(__file__).resolve().parents[1] / 'aw.py'
 
@@ -34,6 +36,7 @@ class Sources:
     prs = staticmethod(sources.prs)
     linear = staticmethod(sources.linear)
     pi_status = staticmethod(sources.pi_status)
+    automerge = staticmethod(lambda repo, slug: sources.automerge(slug))
     fetch_main = staticmethod(gitio.fetch_main)
 
 
@@ -358,6 +361,93 @@ def cmd_claim(args, cfg):
     return code
 
 
+# ---- ready / queue ------------------------------------------------------------------------------
+def cmd_ready(args, cfg):
+    owner, _ = need_owner(args)
+    if not owner:
+        return 2
+    trees, err = resolve_trees(args, cfg)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+    declared = [name for name in queue.DECLARABLE if getattr(args, name.replace('-', '_'))]
+    results, code = [], 0
+    for path, issue, branch, repo in trees:
+        file = claims.claim_file(gitio.common_dir(path), path)
+        claim, ahead = claims.read(file), (gitio.drift(path) or (None, None))[0]
+        why = None
+        if claims.state(claim) not in ('held', 'stale', 'handoff') or claim['owner'] != owner:
+            why = f'claim this worktree first: it is {claims.describe(claim)}'
+        elif gitio.busy(path):
+            why = f'{gitio.busy(path)}: commit or drop it before reporting READY_FOR_PR'
+        elif not ahead:
+            why = 'no commits ahead of origin/main: there is nothing to open'
+        if why:
+            results.append({'worktree': path, 'ok': False, 'code': 'refused', 'message': why, 'ready': None})
+            code = 3
+            continue
+        tree = {'issue': issue, 'branch': branch, 'head': gitio.rev(path, 'HEAD')}
+        got = queue.record(file, owner, tree, args.tests, declared, args.set, queue.changed_files(path), cfg)
+        results.append({'worktree': path, 'repo': repo, 'ok': got.ok, 'code': got.code, 'message': got.message,
+                        'ready': (got.claim or {}).get('ready') if got.ok else None})
+        code = code or (0 if got.ok else 3)
+    out = []
+    for r in results:
+        e = r['ready']
+        out += [f'{r["worktree"]}: {r["message"]}'] if not e else [
+            f'READY_FOR_PR  {e["issue"] or "-"}  {r["repo"]}  {e["branch"]} @ {e["commit"][:12]}',
+            f'  tests    {e["tests"]}',
+            f'  touches  {e["files"]} file(s); {e["kind"]}' + (', docs-only' if e['docs_only'] else '')
+            + (f'; {", ".join(e["classes"])}' if e['classes'] else '; no ADR, contract, deployment or Needs Cody')
+            + (f'; merge set {e["set"]}' if e['set'] else ''),
+            '  Do not open the PR: the orchestrator releases it (`queue release`) when there is room.']
+    emit(args, {'owner': owner, 'results': results}, '\n'.join(out))
+    return code
+
+
+def queue_board(cfg):
+    prs = {name: SOURCES.prs(name, repo['slug']) for name, repo in cfg['repos'].items()}
+    settings = {name: SOURCES.automerge(name, repo['slug']) for name, repo in cfg['repos'].items()}
+    return queue.board(cfg, model.workspace(cfg), prs, settings, lambda name, issue: SOURCES.prs(name, cfg['repos'][name]['slug'], issue))
+
+
+def cmd_queue(args, cfg):
+    doc = queue_board(cfg)
+    blind = any(u['source'].startswith('github:') for u in doc['unavailable'])
+    if args.action != 'release':
+        emit(args, doc, '\n'.join(queue.render(doc)))
+        return 4 if blind else 0
+    owner, _ = need_owner(args)
+    if not owner:
+        return 2
+    issue = gitio.issue_id(args.issue) if args.issue else None
+    top = claims.norm(gitio.toplevel(args.path) or args.path) if args.path else None
+    wanted = [e for e in doc['queue'] if (issue is None or e['issue'] == issue) and (top is None or claims.norm(e['worktree']) == top)
+              and (issue or top) and e['state'] in ('ready', 'stale')]
+    if not wanted:
+        print(f'nothing is READY_FOR_PR for {args.issue or args.path or "(name an issue or --path)"}', file=sys.stderr)
+        return 3
+    if blind:
+        emit(args, {**doc, 'released': []}, 'not released: GitHub could not be read, so the open PRs are unknown\n'
+             + '\n'.join(f'  {u["source"]}: {u["reason"]}' for u in doc['unavailable']))
+        return 4
+    out, released, code = [], [], 0
+    for e in wanted:
+        if not e['can_release']:
+            out.append(f'{e["issue"] or e["branch"]} {e["repo"]}: not released: ' + '; '.join(e['blocked_by']))
+            code = 3
+            continue
+        got = claims.mark_released(e['claim_file'], e['commit'], owner)
+        if not got.ok:
+            out.append(f'{e["issue"] or e["branch"]} {e["repo"]}: not released: {got.message}')
+            code = 3
+            continue
+        released.append({'issue': e['issue'], 'repo': e['repo'], 'branch': e['branch'], 'owner': e['owner']})
+        out.append(f'{e["issue"] or e["branch"]} {e["repo"]}: released by {owner}: {e["owner"]} may open the PR for {e["branch"]} now')
+    emit(args, {**doc, 'released': released}, '\n'.join(out))
+    return code
+
+
 # ---- prs / needs-cody ---------------------------------------------------------------------------
 def cmd_prs(args, cfg):
     issue = gitio.issue_id(args.issue) if args.issue else None
@@ -482,6 +572,19 @@ def main(argv=None):
         p.add_argument('--note', default='')
         p.add_argument('--force', action='store_true', help='take or drop a claim that is not yours: an owner decision')
         p.add_argument('--to', default='any', help='handoff: the receiving session label, `any`, or `cody` to ask the owner')
+    p = sub.add_parser('ready', parents=[common])
+    p.add_argument('issue', nargs='?')
+    p.add_argument('--path')
+    p.add_argument('--tests', required=True, help='what was run and its result, as you would report it')
+    p.add_argument('--set', help='the merge set this branch belongs to, when it is not simply its issue')
+    p.add_argument('--needs-cody', action='store_true', help='the change needs an owner decision or owner-only validation')
+    p.add_argument('--adr', action='store_true', help='the change makes or alters an ADR decision')
+    p.add_argument('--contract', action='store_true', help='the change alters a protocol or cross-repo contract')
+    p.add_argument('--deployment', action='store_true', help='the change alters deployment or appliance behaviour')
+    p = sub.add_parser('queue', parents=[common])
+    p.add_argument('action', nargs='?', choices=['list', 'release'], default='list')
+    p.add_argument('issue', nargs='?')
+    p.add_argument('--path')
     p = sub.add_parser('prs', parents=[common])
     p.add_argument('issue', nargs='?')
     sub.add_parser('needs-cody', parents=[common])
@@ -505,4 +608,4 @@ def main(argv=None):
             return 1
     cfg = model.load_config()
     return {'status': cmd_status, 'issue': cmd_issue, 'context': cmd_context, 'start': cmd_start, 'claim': cmd_claim, 'release': cmd_claim,
-            'handoff': cmd_claim, 'prs': cmd_prs, 'needs-cody': cmd_needs_cody, 'setup': cmd_setup}[args.command](args, cfg)
+            'handoff': cmd_claim, 'ready': cmd_ready, 'queue': cmd_queue, 'prs': cmd_prs, 'needs-cody': cmd_needs_cody, 'setup': cmd_setup}[args.command](args, cfg)

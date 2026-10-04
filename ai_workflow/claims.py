@@ -153,6 +153,8 @@ def acquire(path, worktree, owner, *, agent='agent', issue=None, branch=None, re
             doc['claimed_at'] = current.get('claimed_at', doc['claimed_at'])
             doc['issue'] = issue or current.get('issue')
             doc['note'] = note or current.get('note', '')
+            if current.get('ready'):                         # a READY_FOR_PR record outlives a refresh
+                doc['ready'] = current['ready']
             code = 'refreshed'
         elif st == 'handoff' and current['handoff_to'] in (owner, 'any'):
             doc['previous_owner'] = current['owner']
@@ -218,3 +220,27 @@ def handoff(path, owner, to='any', note='', now=None):
         current.update(handoff_to=to, handoff_note=note, handoff_at=stamp(now))
         _write(path, current)
         return Outcome(True, 'handoff', current)
+
+
+def annotate(path, owner, **fields):
+    """Set extra fields on our own live claim (for example the READY_FOR_PR record)."""
+    with _lock(path):
+        current = read(path)
+        if current is None or current.get('corrupt') or current['owner'] != owner:
+            return Outcome(False, 'refused-not-owner', current, f'claim this worktree first: it is {describe(current)}')
+        current.update(fields)
+        _write(path, current)
+        return Outcome(True, 'recorded', current)
+
+
+def mark_released(path, commit, by, now=None):
+    """The orchestrator's release of a READY_FOR_PR record. Not an ownership change: the claim's
+    owner still opens the PR. Refused when the record is gone or is for another commit."""
+    with _lock(path):
+        current = read(path)
+        ready = None if current is None or current.get('corrupt') else current.get('ready')
+        if not ready or ready.get('commit') != commit:
+            return Outcome(False, 'refused-changed', current, 'the READY_FOR_PR record changed; list the queue again')
+        ready['released'] = {'by': by, 'at': stamp(now or utcnow())}
+        _write(path, current)
+        return Outcome(True, 'released', current)

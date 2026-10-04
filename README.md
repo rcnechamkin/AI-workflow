@@ -129,6 +129,49 @@ rebuilds it.
 | Ready for Agent | `Todo`, Open Decisions says none, repositories known, nothing above applies |
 | Unknown / incomplete evidence | anything the answer depends on could not be read |
 
+## Merge queue and WIP limits
+
+A finished branch is reported, not opened. The agent commits, runs its tests and records
+READY_FOR_PR on its own claim; the orchestrator releases it when the limits leave room; only then
+does the agent open the PR.
+
+```
+python aw.py ready AVR-236 --tests "unit 40/40, offline pass" [--set NAME] [--needs-cody] [--adr] [--contract] [--deployment]
+python aw.py queue                      # what is ready, what occupies each slot, merge sets, auto-merge eligibility
+python aw.py queue release AVR-236      # the orchestrator: refused, naming the occupant, when there is no room
+```
+
+`ready` needs your live claim, a clean worktree and commits ahead of `origin/main`. It records the
+issue, branch, commit, your test report and a classification computed from the changed paths:
+docs-only, ADR (`docs/adr/`), protocol or contract, deployment. The flags only add to what the
+paths show; nothing you declare makes a change more boring. If the branch moves afterwards the
+record is stale: run `ready` again.
+
+Limits (override in `workflow.json` under `wip`):
+
+| limit | default |
+| --- | --- |
+| open implementation PRs per agent, across repositories | 1 |
+| open PRs per repository | 2 |
+| of which substantive / docs-only | 1 / 1 |
+
+The PRs of one merge set count as one change for the per-agent limit.
+
+A **merge set** is the PRs that must land together: by default the PRs and ready branches of one
+issue across repositories, or entries given the same `--set NAME`. It is `mergeable` only when
+every member is an open PR that is green, current with main, not a draft and free of conflicts. A
+member that merged without the others is reported as `SPLIT`.
+
+**Auto-merge eligibility** is a classification, never an action: docs-only, no ADR decision, no
+protocol or contract change, no deployment change, no Needs Cody (which requires a READY_FOR_PR
+record, since only its author can declare that), current with main, CI green, and its merge set
+ready. Each failing criterion is named. Separately, each repository reports whether GitHub
+auto-merge can work there at all (`allow_auto_merge` and required status checks on main), so a gap
+in repository settings is visible rather than assumed.
+
+The tool never opens or merges a PR, never enables auto-merge and never changes a repository
+setting. If GitHub cannot be read, nothing is released and the exit code is 4.
+
 ## Worktree claims
 
 A claim is a small local file saying which session is working in a worktree. Git enforces it:

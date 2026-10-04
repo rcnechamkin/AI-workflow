@@ -87,8 +87,9 @@ def run(*argv):
 
 
 def pr(repo, number, branch, state='OPEN', checks=(('COMPLETED', 'SUCCESS'),), draft=False, merged=None, title=None,
-       mergeable='MERGEABLE', review=''):
-    return {'number': number, 'title': title or f'{branch} change', 'state': state, 'isDraft': draft, 'headRefName': branch,
+       mergeable='MERGEABLE', review='', files=None):
+    more = {} if files is None else {'files': [{'path': f} for f in files]}
+    return {**more, 'number': number, 'title': title or f'{branch} change', 'state': state, 'isDraft': draft, 'headRefName': branch,
             'baseRefName': 'main', 'url': f'https://example.invalid/{repo}/pull/{number}', 'mergedAt': merged,
             'reviewDecision': review, 'mergeable': mergeable, 'statusCheckRollup': [{'status': s, 'conclusion': c} for s, c in checks]}
 
@@ -120,13 +121,14 @@ NO_LINEAR = sources.unavailable('no LINEAR_API_KEY in the environment and no ai-
 NO_PI = sources.unavailable('http://127.0.0.1:9/status unreachable (URLError)')
 
 
-def world(issues=None, party=(), games=(), pi=NO_PI, fail=(), behind=None, fetch=True):
+def world(issues=None, party=(), games=(), pi=NO_PI, fail=(), behind=None, fetch=True, automerge=None):
     """The outside world for the CLI: Linear issues (None = unavailable), PR rows, Pi, fetch."""
     runner = gh({'o/avrana-party': list(party), 'o/avrana-party-games': list(games)}, fail=fail, behind=behind)
 
     class World:
         prs = staticmethod(lambda repo, slug, issue=None: sources.prs(repo, slug, issue, run=runner))
         pi_status = staticmethod(lambda url: pi)
+        automerge = staticmethod(lambda repo, slug: (automerge or {}).get(repo, sources.unavailable('repository settings not readable')))
         fetch_main = staticmethod(gitio.fetch_main if fetch else (lambda repo: False))
 
         @staticmethod
