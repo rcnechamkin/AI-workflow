@@ -129,6 +129,47 @@ rebuilds it.
 | Ready for Agent | `Todo`, Open Decisions says none, repositories known, nothing above applies |
 | Unknown / incomplete evidence | anything the answer depends on could not be read |
 
+## The pipeline
+
+One issue, one path, every step a command that reads recorded state. Nothing here asks a model to
+decide anything; `next` says which step is due and who takes it.
+
+```
+python aw.py next AVR-236        # the single next step, or why a human must decide (exit 3)
+```
+
+| stage | who | command | stops when |
+| --- | --- | --- | --- |
+| assign | agent | `start AVR-236` | open decisions, Backlog, blocked, missing sections, another session holds it |
+| context | agent | printed by `start`; `context AVR-236` | the issue names nothing that exists (insufficient) |
+| implement | agent | edit and commit in the claimed worktree | - |
+| validate | agent | `validate AVR-236` | a required check fails |
+| ready | agent | `ready AVR-236` | not validated at this commit |
+| release | orchestrator | `queue release AVR-236` | no room under the WIP limits |
+| PR | agent | `pr AVR-236` | not released; branch moved; GitHub unreadable |
+| merge | owner | on GitHub | always a human, unless `queue` reports auto-merge eligible and the repository allows it |
+| reconcile | orchestrator | `reconcile` | Linear or GitHub unreadable |
+
+`validate` runs the checks listed under `validate` in `workflow.json` (copied from each
+repository's AGENTS.md) in the worktree, on committed work only, and records the result with the
+commit on the claim. `ready` then needs no typed test report. A check marked `advisory_on` this
+platform is run and reported but does not fail validation; the repository's Linux CI remains the
+authority for it. A repository with no checks configured is never "validated".
+
+`pr` is the only command that writes to GitHub: it pushes the released branch (a plain push) and
+opens the PR, with title and body built from the READY_FOR_PR record. A change classed as ADR,
+protocol/contract, deployment or Needs Cody says "Requires Cody before merge" in the body.
+
+`reconcile` compares each active issue's Linear state with its worktrees and PRs and lists what to
+correct and who does it (set the issue In Progress / In Review, release a claim whose PR merged,
+a closed issue that still has an open PR). It writes nothing: Linear is changed by whoever holds
+the Linear connector.
+
+Human approval is never inferred. Product direction, architecture, trust and security boundaries,
+destructive changes, deployment and ambiguous requirements stop at `start` (open decisions,
+missing sections) or at merge (the classes above are never auto-merge eligible). Graphify appears
+only as marked leads in the context manifest, below every canonical source.
+
 ## Merge queue and WIP limits
 
 A finished branch is reported, not opened. The agent commits, runs its tests and records

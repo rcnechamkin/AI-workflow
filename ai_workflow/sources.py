@@ -95,6 +95,26 @@ def prs(repo, slug, issue=None, run=_run):
     return ok(rows)
 
 
+def run_check(command, cwd, timeout=None):
+    """(returncode, combined output) of one validation command run in `cwd`. A command that cannot
+    be started or times out is a failure, never a pass."""
+    try:
+        p = subprocess.run(command, cwd=cwd, shell=True, capture_output=True, text=True, timeout=timeout or 1800,
+                           encoding='utf-8', errors='replace')
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, f'{type(e).__name__}: {command}'
+    return p.returncode, (p.stdout or '') + (p.stderr or '')
+
+
+def open_pr(slug, branch, title, body, run=_run):
+    """Open a PR for an already pushed branch. The one place this tool writes to GitHub."""
+    rc, out, err = run(['gh', 'pr', 'create', '--repo', slug, '--base', 'main', '--head', branch, '--title', title, '--body', body])
+    url = next((line.strip() for line in reversed((out or '').splitlines()) if '/pull/' in line), None)
+    if rc or not url:
+        return unavailable(f'gh pr create failed for {slug} ({((err or out or "").strip().splitlines() or ["no answer"])[-1]})')
+    return ok({'url': url, 'number': int(url.rstrip('/').rsplit('/', 1)[-1]) if url.rstrip('/').rsplit('/', 1)[-1].isdigit() else None})
+
+
 def automerge(slug, run=_run):
     """Whether GitHub auto-merge can work on `slug` at all: the repository setting, and required
     status checks on main (branch protection or a ruleset). Read-only; a failure is unavailable."""

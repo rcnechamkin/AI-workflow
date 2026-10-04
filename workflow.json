@@ -8,6 +8,23 @@
   "queue_repos": {
     "workflow": {"slug": "rcnechamkin/AI-workflow", "dir": "AI-workflow"}
   },
+  "validate": {
+    "party": [
+      {"name": "repo", "run": "npm run check:repo"},
+      {"name": "unit", "run": "npm run test:unit", "advisory_on": ["win32"]},
+      {"name": "modules", "run": "npm run test:modules"},
+      {"name": "offline-browser", "run": "npm run test:offline-browser", "advisory_on": ["win32"]}
+    ],
+    "games": [
+      {"name": "privacy", "run": "python tests/test_no_private_data.py"},
+      {"name": "catalog", "run": "python ops/export_avrana_catalog.py --check provider/catalog.json"},
+      {"name": "pytest", "run": "python -m pytest -q"},
+      {"name": "syntax", "run": "npm run check:syntax"}
+    ],
+    "workflow": [
+      {"name": "unit", "run": "python -m unittest discover -s tests"}
+    ]
+  },
   "status_url": "https://party.avrana.net/party/api/status",
   "claim_ttl_hours": 6
 }

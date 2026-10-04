@@ -121,7 +121,8 @@ NO_LINEAR = sources.unavailable('no LINEAR_API_KEY in the environment and no ai-
 NO_PI = sources.unavailable('http://127.0.0.1:9/status unreachable (URLError)')
 
 
-def world(issues=None, party=(), games=(), pi=NO_PI, fail=(), behind=None, fetch=True, automerge=None, others=None):
+def world(issues=None, party=(), games=(), pi=NO_PI, fail=(), behind=None, fetch=True, automerge=None, others=None,
+          checks=None, opened=None, ran=None):
     """The outside world for the CLI: Linear issues (None = unavailable), PR rows, Pi, fetch."""
     runner = gh({'o/avrana-party': list(party), 'o/avrana-party-games': list(games), **(others or {})}, fail=fail, behind=behind)
 
@@ -129,6 +130,21 @@ def world(issues=None, party=(), games=(), pi=NO_PI, fail=(), behind=None, fetch
         prs = staticmethod(lambda repo, slug, issue=None: sources.prs(repo, slug, issue, run=runner))
         pi_status = staticmethod(lambda url: pi)
         automerge = staticmethod(lambda repo, slug: (automerge or {}).get(repo, sources.unavailable('repository settings not readable')))
+        @staticmethod
+        def run_check(command, cwd, timeout=None):
+            if ran is not None:
+                ran.append((command, cwd))
+            rc = (checks or {}).get(command, 127)
+            return rc, f'output of {command}\n' + ('' if rc == 0 else 'FAILED: assertion\n')
+
+        @staticmethod
+        def open_pr(slug, branch, title, body):
+            if slug in fail:
+                return sources.unavailable('error connecting to api.github.com')
+            (opened if opened is not None else []).append({'slug': slug, 'branch': branch, 'title': title, 'body': body})
+            n = len(opened or [1])
+            return sources.ok({'url': f'https://example.invalid/{slug}/pull/{n}', 'number': n})
+
         fetch_main = staticmethod(gitio.fetch_main if fetch else (lambda repo: False))
 
         @staticmethod

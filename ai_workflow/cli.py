@@ -7,7 +7,11 @@ on, by whom, in which worktree, in what state, and what needs the owner.
     python aw.py context AVR-236                           what to read first, with provenance; changing nothing
     python aw.py status                                    every worktree: branch, issue, claim, drift, unfinished work
     python aw.py claim [AVR-236] | release | handoff --to X --note "..."
-    python aw.py ready [AVR-236] --tests "unit 40/40"      report READY_FOR_PR instead of opening a PR
+    python aw.py next AVR-236                              the single next step for this issue, or why a human must decide
+    python aw.py validate [AVR-236]                        run the repository's own checks; record the result on the claim
+    python aw.py ready [AVR-236]                           report READY_FOR_PR instead of opening a PR
+    python aw.py pr [AVR-236]                              once released: push the branch and open the PR from the record
+    python aw.py reconcile                                 Linear against git and GitHub: what to correct, and who does it
     python aw.py queue [release AVR-236]                   the merge queue, WIP limits, merge sets, auto-merge eligibility
     python aw.py prs [AVR-237]                             PRs, CI, review and pairing across repositories
     python aw.py needs-cody                                the owner's queue; agent work; what could not be checked
@@ -15,8 +19,9 @@ on, by whom, in which worktree, in what state, and what needs the owner.
     python aw.py guard                                     optional Claude Code PreToolUse hook (hook JSON on stdin)
 
 Options go after the command; `--json` gives every answer as data. Writes only local claim
-files, git hooks (setup) and new branches/worktrees (start). Never pushes, opens or merges a PR,
-enables auto-merge, changes a repository setting, deploys, or writes to Linear or GitHub. Exit codes: 0 ok, 2 usage, 3 refused, 4 a required source was
+files, git hooks (setup) and new branches/worktrees (start); `pr` alone pushes a released branch and
+opens its PR. Never merges, force-pushes, enables auto-merge, changes a repository setting, deploys,
+or writes to Linear. Exit codes: 0 ok, 2 usage, 3 refused, 4 a required source was
 unavailable.
 """
 import argparse
@@ -26,7 +31,7 @@ from pathlib import Path
 import re
 import sys
 
-from . import claims, context, gitio, guard, hooks, model, queue, sources, tokens
+from . import claims, context, gitio, guard, hooks, model, pipeline, queue, sources, tokens
 
 AW = Path(__file__).resolve().parents[1] / 'aw.py'
 
@@ -37,6 +42,8 @@ class Sources:
     linear = staticmethod(sources.linear)
     pi_status = staticmethod(sources.pi_status)
     automerge = staticmethod(lambda repo, slug: sources.automerge(slug))
+    run_check = staticmethod(sources.run_check)
+    open_pr = staticmethod(sources.open_pr)
     fetch_main = staticmethod(gitio.fetch_main)
 
 
@@ -383,6 +390,15 @@ def cmd_ready(args, cfg):
             why = f'{gitio.busy(path)}: commit or drop it before reporting READY_FOR_PR'
         elif not ahead:
             why = 'no commits ahead of origin/main: there is nothing to open'
+        tests = args.tests
+        if not why and not tests:
+            validated = claim.get('validated')
+            if not validated or validated.get('commit') != gitio.rev(path, 'HEAD'):
+                why = 'this commit has not been validated: run `validate` first (or pass --tests with what you ran)'
+            elif not validated['ok']:
+                why = 'validation failed at this commit: fix it and run `validate` again'
+            else:
+                tests = pipeline.summary(validated)
         if why:
             results.append({'worktree': path, 'ok': False, 'code': 'refused', 'message': why, 'ready': None})
             code = 3
@@ -391,7 +407,7 @@ def cmd_ready(args, cfg):
         listed = SOURCES.prs(repo, cfg['repos'][repo]['slug']) if repo else None       # is a PR already open for this branch?
         number = next((p['number'] for p in listed['data'] if p['state'] == 'open' and p['branch'] == branch), None) \
             if listed and listed['available'] else None
-        got = queue.record(file, owner, tree, args.tests, declared, args.set, queue.changed_files(path), cfg, pr=number)
+        got = queue.record(file, owner, tree, tests, declared, args.set, queue.changed_files(path), cfg, pr=number)
         results.append({'worktree': path, 'repo': repo, 'ok': got.ok, 'code': got.code, 'message': got.message,
                         'pr_checked': bool(listed and listed['available']),
                         'ready': (got.claim or {}).get('ready') if got.ok else None})
@@ -410,6 +426,159 @@ def cmd_ready(args, cfg):
             + '  Do not open the PR: the orchestrator releases it (`queue release`) when there is room.']
     emit(args, {'owner': owner, 'results': results}, '\n'.join(out))
     return code
+
+
+def cmd_validate(args, cfg):
+    owner, _ = need_owner(args)
+    if not owner:
+        return 2
+    cfg = model.queue_config(cfg)
+    trees, err = resolve_trees(args, cfg)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+    results, out, code = [], [], 0
+    for path, issue, branch, repo in trees:
+        file = claims.claim_file(gitio.common_dir(path), path)
+        claim = claims.read(file)
+        row = {'worktree': path, 'repo': repo, 'ok': False, 'validated': None, 'message': ''}
+        results.append(row)
+        if claims.state(claim) not in ('held', 'stale', 'handoff') or claim['owner'] != owner:
+            row['message'], code = f'claim this worktree first: it is {claims.describe(claim)}', code or 3
+        elif gitio.busy(path):
+            row['message'], code = f'{gitio.busy(path)}: validation covers committed work only', code or 3
+        else:
+            validated, tails = pipeline.validate(cfg, repo, path, SOURCES.run_check)
+            if validated is None:
+                row['message'], code = f'no validation is configured for {repo or "this repository"}: not validated', 4
+            else:
+                claims.annotate(file, owner, validated=validated)
+                row.update(ok=validated['ok'], validated=validated)
+                out += [f'{path} @ {validated["commit"][:12]}'] + [
+                    f'  {"PASS" if c["ok"] else "FAIL (advisory on this platform)" if c["advisory"] else "FAIL"}  {c["name"]:<16} '
+                    f'{c["seconds"]}s  {c["run"]}' for c in validated['checks']]
+                for name, tail in tails:
+                    out += [f'  --- {name}: last lines'] + [f'    {line}' for line in tail]
+                out.append(f'  {"validated" if validated["ok"] else "NOT validated"}')
+                code = code or (0 if validated['ok'] else 3)
+        if row['message']:
+            out.append(f'{path}: {row["message"]}')
+    emit(args, {'owner': owner, 'results': results}, '\n'.join(out))
+    return code
+
+
+def cmd_pr(args, cfg):
+    owner, _ = need_owner(args)
+    if not owner:
+        return 2
+    qcfg = model.queue_config(cfg)
+    trees, err = resolve_trees(args, qcfg)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+    doc = queue_board(cfg)
+    if any(u['source'].startswith('github:') for u in doc['unavailable']):
+        emit(args, {'results': [], 'unavailable': doc['unavailable']}, 'no PR opened: GitHub could not be read')
+        return 4
+    results, out, code = [], [], 0
+    for path, issue, branch, repo in trees:
+        entry = next((e for e in doc['queue'] if claims.norm(e['worktree']) == claims.norm(path)), None)
+        row = {'worktree': path, 'repo': repo, 'branch': branch, 'opened': False, 'url': None, 'message': ''}
+        results.append(row)
+        existing = next((p for p in doc['repos'].get(repo, {}).get('open', []) if p['branch'] == branch), None)
+        if existing:
+            row.update(url=existing['url'], message=f'{repo}#{existing["number"]} is already open')
+        elif entry is None:
+            row['message'], code = 'no READY_FOR_PR record: run `validate`, then `ready`', code or 3
+        elif entry['owner'] != owner:
+            row['message'], code = f'the record belongs to {entry["owner"]}', code or 3
+        elif entry['state'] != 'released':
+            row['message'] = {'ready': 'not released yet: the orchestrator runs `queue release` when there is room',
+                              'stale': 'the branch moved since READY_FOR_PR: run `validate` and `ready` again'}.get(
+                                  entry['state'], f'nothing to open: the entry is {entry["state"]}')
+            code = code or 3
+        else:
+            ready = claims.read(entry['claim_file'])['ready']
+            linear = SOURCES.linear(entry['issue'], snapshot=args.linear_snapshot) if entry['issue'] else None
+            record = linear['data'].get(entry['issue']) if linear and linear['available'] else None
+            title = record['title'] if record else (gitio.git(path, 'log', '-1', '--format=%s')[1] or branch)
+            title, body = pipeline.pr_text(ready, title, ready['released']['by'])
+            row.update(title=title, body=body)
+            if args.dry_run:
+                row['message'] = f'would push {branch} and open "{title}"'
+            elif gitio.git(path, 'push', '-u', 'origin', branch, timeout=180)[0]:
+                row['message'], code = f'git push of {branch} failed; nothing opened', 4
+            else:
+                got = SOURCES.open_pr(qcfg['repos'][repo]['slug'], branch, title, body)
+                if got['available']:
+                    ready['pr'] = got['data']['number']
+                    claims.annotate(entry['claim_file'], owner, ready=ready)
+                    row.update(opened=True, url=got['data']['url'], message=f'opened {got["data"]["url"]}')
+                else:
+                    row['message'], code = got['reason'], 4
+        out.append(f'{path}: {row["message"]}')
+    emit(args, {'owner': owner, 'results': results}, '\n'.join(out))
+    return code
+
+
+def cmd_next(args, cfg):
+    issue = need_issue(args.issue)
+    owner, _ = need_owner(args)
+    if not issue or not owner:
+        return 2
+    linear, prs, pi = gather(cfg, issue, args)
+    ws = model.workspace(cfg)
+    ctx = model.issue_context(cfg, issue, ws, linear, prs, pi, me=owner, repos_override=repo_list(args, cfg))
+    blind = [u for u in ctx['unavailable'] if u['source'] == 'linear' or u['source'].startswith('github:')]
+    if blind:
+        emit(args, {'issue': issue, 'steps': [], 'unavailable': blind},
+             f'{issue}: cannot say what is next\n' + '\n'.join(f'  {u["source"]}: {u["reason"]}' for u in blind))
+        return 4
+    rows = [p for res in prs.values() for p in res['data']]
+    steps = pipeline.next_steps(model.queue_config(cfg), issue, ctx, model.trees_for(ws, issue), rows, owner)
+    emit(args, {'issue': issue, 'owner': owner, 'state': ctx['readiness']['state'], 'steps': steps},
+         '\n'.join(f'{issue}{" " + s["repo"] if s["repo"] else ""}  [{s["stage"]}]  {s["who"]}: {s["next"]}'
+                   + (f'\n    because: {s["why"]}' if s['why'] else '') for s in steps))
+    return 3 if any(s['stage'] == 'stop' for s in steps) else 0
+
+
+def cmd_reconcile(args, cfg):
+    ws = model.workspace(cfg)
+    unavailable, open_prs = [], []
+    for name, repo in cfg['repos'].items():
+        res = SOURCES.prs(name, repo['slug'])
+        if res['available']:
+            open_prs += [p for p in res['data'] if p['state'] == 'open']
+        else:
+            unavailable.append({'source': f'github:{name}', 'reason': res['reason']})
+    everything = SOURCES.linear(snapshot=args.linear_snapshot)
+    if not everything['available']:
+        unavailable.append({'source': 'linear', 'reason': everything['reason']})
+
+    def linear(issue):
+        if not everything['available']:
+            return None
+        if issue not in everything['data']:               # the active-issue read leaves out finished issues
+            one = SOURCES.linear(issue, snapshot=args.linear_snapshot)
+            if one['available']:
+                everything['data'].update(one['data'])
+        return everything['data'].get(issue)
+
+    def history(issue):
+        rows = []
+        for name, repo in cfg['repos'].items():
+            res = SOURCES.prs(name, repo['slug'], issue)
+            if not res['available']:
+                return None
+            rows += res['data']
+        return rows
+
+    actions, missing = pipeline.reconcile(ws, linear, open_prs, history)
+    unavailable += [m for m in missing if everything['available'] or m['source'] != 'linear']
+    out = [f'To correct ({len(actions)})'] + [f'  {a["issue"]}  [{a["who"]}] {a["text"]}' for a in actions]
+    out += [f'Could not check ({len(unavailable)})'] + [f'  {u["source"]}: {u["reason"]}' for u in unavailable]
+    emit(args, {'schema': 'ai-workflow.reconcile/v1', 'actions': actions, 'unavailable': unavailable}, '\n'.join(out))
+    return 4 if unavailable else 0
 
 
 def queue_board(cfg):
@@ -583,12 +752,21 @@ def main(argv=None):
     p = sub.add_parser('ready', parents=[common])
     p.add_argument('issue', nargs='?')
     p.add_argument('--path')
-    p.add_argument('--tests', required=True, help='what was run and its result, as you would report it')
+    p.add_argument('--tests', help='what was run and its result; default: the recorded `validate` result for this commit')
     p.add_argument('--set', help='the merge set this branch belongs to, when it is not simply its issue')
     p.add_argument('--needs-cody', action='store_true', help='the change needs an owner decision or owner-only validation')
     p.add_argument('--adr', action='store_true', help='the change makes or alters an ADR decision')
     p.add_argument('--contract', action='store_true', help='the change alters a protocol or cross-repo contract')
     p.add_argument('--deployment', action='store_true', help='the change alters deployment or appliance behaviour')
+    for name in ('validate', 'pr'):
+        p = sub.add_parser(name, parents=[common])
+        p.add_argument('issue', nargs='?')
+        p.add_argument('--path')
+        p.add_argument('--dry-run', action='store_true', help='pr: show what would be pushed and opened; change nothing')
+    p = sub.add_parser('next', parents=[common])
+    p.add_argument('issue')
+    p.add_argument('--repo', choices=['party', 'games', 'both'], help='the repositories, when the issue does not say')
+    sub.add_parser('reconcile', parents=[common])
     p = sub.add_parser('queue', parents=[common])
     p.add_argument('action', nargs='?', choices=['list', 'release'], default='list')
     p.add_argument('issue', nargs='?')
@@ -616,4 +794,5 @@ def main(argv=None):
             return 1
     cfg = model.load_config()
     return {'status': cmd_status, 'issue': cmd_issue, 'context': cmd_context, 'start': cmd_start, 'claim': cmd_claim, 'release': cmd_claim,
-            'handoff': cmd_claim, 'ready': cmd_ready, 'queue': cmd_queue, 'prs': cmd_prs, 'needs-cody': cmd_needs_cody, 'setup': cmd_setup}[args.command](args, cfg)
+            'handoff': cmd_claim, 'ready': cmd_ready, 'queue': cmd_queue, 'validate': cmd_validate, 'pr': cmd_pr, 'next': cmd_next,
+            'reconcile': cmd_reconcile, 'prs': cmd_prs, 'needs-cody': cmd_needs_cody, 'setup': cmd_setup}[args.command](args, cfg)
