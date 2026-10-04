@@ -37,6 +37,7 @@ It also reports whether Linear, GitHub and a session identity are available.
 
 ```sh
 python aw.py issue AVR-236            # readiness and context; changes nothing
+python aw.py context AVR-236          # what to read first, with provenance; changes nothing
 python aw.py start AVR-236            # ready? -> worktree(s) from origin/main, claimed, context printed
 #   ... the agent is told only: Implement AVR-236 ...
 python aw.py prs AVR-236              # PRs, CI, review, pairing, distance behind main
@@ -83,6 +84,37 @@ unresolved, with the text quoted.
 When the issue does not follow the template the owner can supply what is missing:
 `--repo party|games|both`, and `--decisions-confirmed` (the owner's statement that no product
 decision is open; an agent must not pass it on its own).
+
+### Context manifest
+
+`context AVR-N` (and every `start`) lists the smallest set of things to read before working the
+issue. It lists references, never file contents: the agent opens what it needs.
+
+| Tier | Selected because | Authority shown |
+|---|---|---|
+| 1 explicit | the issue names the path, the file's basename, the ADR number, or a name the file defines | the file's own: `canonical`, `adr (accepted)`, `implementation`, `tests`, ... |
+| 2 canonical | the repository's `AGENTS.md`; canonical docs and ADRs (per `docs/manifest.json`) that mention what the issue names | `canonical`, `adr (...)` |
+| 3 exact | code and tests containing an identifier the issue names; tests named after that code | `implementation`, `tests` |
+| 4 Graphify | a Graphify node matching the issue points at the file | `derived (verify in the file)` |
+| 5 search | the file contains several words of the title | `inferred` |
+
+Each item carries `ref`, `repo`, `kind`, `tier`, `source_type`, `authority`, `why`, `commit` and
+an estimated size. A file appears once, at its best tier, so Graphify and search can add leads but
+never re-label or outrank a file the issue or a canonical document already selected. Graphify hits
+are checked against the real checkout (a node pointing at a missing file is dropped with a
+warning), and the graph is reported stale when files changed since its `built_at_commit`.
+
+Everything is read from git objects at one commit per repository: the issue's worktree `HEAD` when
+it has one, else `origin/main`. Nothing in a product repository is touched.
+
+The budget (`--max-items`, default 20; `--max-tokens`, default 60000 estimated) trims from the
+lowest tier up and says how much was left out. When the issue names nothing that exists in the
+repository, the manifest is `insufficient` (exit 4) and Graphify and search leads are withheld:
+it does not guess a scope. Unresolved, ambiguous and too-common references are listed as warnings.
+
+`start` saves the manifest to this tool's state directory (`.state/`, or `AI_WORKFLOW_STATE`),
+which is ignored by git and outside the product repositories. It is disposable: `context AVR-N`
+rebuilds it.
 
 ### Readiness
 

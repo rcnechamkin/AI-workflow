@@ -4,6 +4,7 @@ on, by whom, in which worktree, in what state, and what needs the owner.
     python aw.py setup [--check | --uninstall | --warn-only] [--chain]   install the commit hooks; verify the setup
     python aw.py start AVR-236 [--repo party|games|both]   readiness, worktrees, claims, context: then "Implement AVR-236"
     python aw.py issue AVR-236                             readiness and structured context, changing nothing
+    python aw.py context AVR-236                           what to read first, with provenance; changing nothing
     python aw.py status                                    every worktree: branch, issue, claim, drift, unfinished work
     python aw.py claim [AVR-236] | release | handoff --to X --note "..."
     python aw.py prs [AVR-237]                             PRs, CI, review and pairing across repositories
@@ -23,7 +24,7 @@ from pathlib import Path
 import re
 import sys
 
-from . import claims, gitio, guard, hooks, model, sources, tokens
+from . import claims, context, gitio, guard, hooks, model, sources, tokens
 
 AW = Path(__file__).resolve().parents[1] / 'aw.py'
 
@@ -136,6 +137,41 @@ def cmd_issue(args, cfg):
     return 0
 
 
+def manifest_for(cfg, issue, ctx, linear, args, ws=None):
+    """The context manifest for an issue whose Linear record was read, else None."""
+    record = linear['data'].get(issue) if linear['available'] else None
+    if record is None:
+        return None
+    return context.build(cfg, record, ctx['repositories']['value'] or [], ws or model.workspace(cfg),
+                         prs=[{k: p[k] for k in ('repo', 'number', 'state', 'ci', 'branch', 'url')} for g in ctx['prs'] for p in g['prs']],
+                         max_items=getattr(args, 'max_items', None) or context.MAX_ITEMS,
+                         max_tokens=getattr(args, 'max_tokens', None) or context.MAX_TOKENS)
+
+
+def cmd_context(args, cfg):
+    issue = need_issue(args.issue)
+    if not issue:
+        return 2
+    linear, prs, pi = gather(cfg, issue, args)
+    ws = model.workspace(cfg)
+    ctx = model.issue_context(cfg, issue, ws, linear, prs, pi, me=model.owner_identity(args.owner)[0], repos_override=repo_list(args, cfg))
+    manifest = manifest_for(cfg, issue, ctx, linear, args, ws)
+    if manifest is None:
+        why = next((u['reason'] for u in ctx['unavailable'] if u['source'] == 'linear'), 'the Linear issue was not read')
+        emit(args, {'schema': context.SCHEMA, 'issue': issue, 'status': 'unavailable', 'reason': why},
+             f'Context for {issue} [unavailable]: {why}')
+        return 4
+    manifest['readiness'] = {k: ctx['readiness'][k] for k in ('state', 'label', 'can_start', 'reasons')}
+    if args.save:
+        manifest['saved_to'] = str(context.save(manifest))
+    out = context.render(manifest)
+    out.insert(1, f'  State    {ctx["readiness"]["label"]}' + (f': {"; ".join(ctx["readiness"]["reasons"])}' if ctx['readiness']['reasons'] else ''))
+    if manifest['prs']:
+        out.append('  PRs      ' + ', '.join(f'{p["repo"]}#{p["number"]} {p["state"]} ci={p["ci"]}' for p in manifest['prs']))
+    emit(args, manifest, '\n'.join(out))
+    return 4 if manifest['status'] != 'ok' else 0
+
+
 def repo_list(args, cfg):
     repo = getattr(args, 'repo', None)
     return None if not repo else (list(cfg['repos']) if repo == 'both' else [repo])
@@ -222,7 +258,8 @@ def cmd_start(args, cfg):
         adopt = adopt or plan[2]
     if args.dry_run:
         doc['dry_run'] = True
-        out = context_lines(ctx)
+        doc['manifest'] = manifest_for(cfg, issue, ctx, linear, args, ws)
+        out = context_lines(ctx) + context.render(doc['manifest'])
         for name, (action, path, branch) in plans.items():
             doc['workspaces'].append({'repo': name, 'path': path, 'branch': branch, 'action': action, 'claim': 'not claimed (dry run)'})
             out.append(f'  Would     {name}: {action} {path} [{branch}] from origin/main {str(ctx["main"].get(name))[:12]} (as last fetched), then claim it for {owner}')
@@ -257,6 +294,8 @@ def cmd_start(args, cfg):
             claimed.append(file)
     doc['started'] = True
     doc['task'] = f'Implement {issue}'
+    doc['manifest'] = manifest_for(cfg, issue, ctx, linear, args)          # built now, so it reads the claimed worktree
+    doc['manifest_file'] = str(context.save(doc['manifest']))
     doc['commands'] = {'context': f'python {AW.as_posix()} issue {issue} --json',
                        'prs': f'python {AW.as_posix()} prs {issue}',
                        'handoff': f'python {AW.as_posix()} handoff {issue} --to any --note "<state of the work>"',
@@ -267,7 +306,8 @@ def cmd_start(args, cfg):
         out.append(f'  Workspace {w["repo"]}: {w["path"]} [{w["branch"]}] {w["action"]}, claim {w["claim"]} ({owner}){behind}')
     if len(doc['workspaces']) > 1:
         out.append('  Paired change: same branch name in both repositories; each PR links the other and names the merge order')
-    out += [f'  Read      {w["instructions"]}' for w in doc['workspaces']]
+    out += context.render(doc['manifest'])
+    out.append(f'  Saved     {doc["manifest_file"]} (disposable; rebuild with `context {issue}`)')
     out += [f'  Later     {k}: {v}' for k, v in doc['commands'].items()]
     out.append(f'  Task      {doc["task"]}')
     emit(args, doc, '\n'.join(out))
@@ -416,6 +456,12 @@ def main(argv=None):
     p = sub.add_parser('issue', parents=[common])
     p.add_argument('issue')
     p.add_argument('--repo', choices=['party', 'games', 'both'], help='the repositories, when the issue does not say')
+    p = sub.add_parser('context', parents=[common])
+    p.add_argument('issue')
+    p.add_argument('--repo', choices=['party', 'games', 'both'], help='the repositories, when the issue does not say')
+    p.add_argument('--max-items', type=int, help=f'context budget in items (default {context.MAX_ITEMS})')
+    p.add_argument('--max-tokens', type=int, help=f'context budget in estimated tokens (default {context.MAX_TOKENS})')
+    p.add_argument('--save', action='store_true', help='also write the manifest to the state directory')
     p = sub.add_parser('start', parents=[common])
     p.add_argument('issue')
     p.add_argument('--agent', help='agent kind for the claim label, with --session (claude, codex, ...)')
@@ -425,6 +471,8 @@ def main(argv=None):
     p.add_argument('--desc', help='branch description (default: from the title)')
     p.add_argument('--note', default='')
     p.add_argument('--dry-run', action='store_true', help='readiness and the plan only: fetch, create and claim nothing')
+    p.add_argument('--max-items', type=int, help=f'context budget in items (default {context.MAX_ITEMS})')
+    p.add_argument('--max-tokens', type=int, help=f'context budget in estimated tokens (default {context.MAX_TOKENS})')
     p.add_argument('--decisions-confirmed', action='store_true',
                    help='the OWNER states there are no open product decisions although the issue does not say so')
     for name in ('claim', 'release', 'handoff'):
@@ -456,5 +504,5 @@ def main(argv=None):
             print(f'ai-workflow: claim check failed to run ({type(e).__name__}: {e})', file=sys.stderr)
             return 1
     cfg = model.load_config()
-    return {'status': cmd_status, 'issue': cmd_issue, 'start': cmd_start, 'claim': cmd_claim, 'release': cmd_claim,
+    return {'status': cmd_status, 'issue': cmd_issue, 'context': cmd_context, 'start': cmd_start, 'claim': cmd_claim, 'release': cmd_claim,
             'handoff': cmd_claim, 'prs': cmd_prs, 'needs-cody': cmd_needs_cody, 'setup': cmd_setup}[args.command](args, cfg)
