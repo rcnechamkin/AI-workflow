@@ -69,6 +69,22 @@ class ValidateTests(PipelineCase):
         self.assertEqual(code, 4)
         self.assertIn('no validation is configured', out)
 
+    def test_a_commit_made_while_the_checks_run_is_not_validated(self):
+        from ai_workflow import model, pipeline
+        path = self.work()
+        before = git(path, 'rev-parse', 'HEAD')
+
+        def run_and_commit(command, cwd, timeout=None):
+            (path / 'late.py').write_text('late\n', encoding='utf-8')
+            git(path, 'add', '-A')
+            git(path, 'commit', '-q', '-m', 'late')
+            return 0, ''
+
+        cfg = model.load_config(self.root / 'workflow.json', self.root)
+        validated, _ = pipeline.validate(cfg, 'party', str(path), run_and_commit)
+        self.assertEqual((validated['commit'], validated['ok']), (before, False))
+        self.assertTrue(validated['moved'])
+
     def test_ready_uses_the_validation_instead_of_a_typed_report_and_refuses_without_one(self):
         path = self.work()
         self.world()

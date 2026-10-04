@@ -30,7 +30,7 @@ def validate(cfg, repo, worktree, run, platform=sys.platform):
     wanted = checks_for(cfg, repo)
     if not wanted:
         return None, []
-    rows, tails = [], []
+    rows, tails, commit = [], [], gitio.rev(worktree, 'HEAD')
     for check in wanted:
         began = time.monotonic()
         rc, out = run(check['run'], worktree, check.get('timeout'))
@@ -40,7 +40,10 @@ def validate(cfg, repo, worktree, run, platform=sys.platform):
         if rc:
             tails.append((check['name'], (out or '').strip().splitlines()[-TAIL:]))
     required = [r for r in rows if not r['advisory']]
-    return {'commit': gitio.rev(worktree, 'HEAD'), 'ok': all(r['ok'] for r in required), 'checks': rows,
+    moved = gitio.rev(worktree, 'HEAD') != commit            # a commit made meanwhile was not what the checks saw
+    if moved:
+        tails.append(('validate', ['the branch moved while the checks ran: run validate again']))
+    return {'commit': commit, 'ok': not moved and all(r['ok'] for r in required), 'moved': moved, 'checks': rows,
             'at': claims.stamp(claims.utcnow())}, tails
 
 
