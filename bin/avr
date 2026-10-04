@@ -1,0 +1,4 @@
+#!/bin/sh
+# avr: the ai-workflow CLI by a shorter name. `avr start AVR-236` is `python aw.py start AVR-236`.
+here="$(cd "$(dirname "$0")" && pwd)"
+exec "${AI_WORKFLOW_PYTHON:-python}" "$here/../aw.py" "$@"

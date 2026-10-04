@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 
@@ -17,6 +18,8 @@ PR_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,mergedAt,rev
 FAILED = {'FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'}
 PASSED = {'SUCCESS', 'SKIPPED', 'NEUTRAL'}
 SECTIONS = ('Outcome', 'Acceptance Criteria', 'Out of Scope', 'Repositories', 'Tests Required', 'Dependencies', 'Open Decisions')
+# headings real issues use for the same section (the issue template says Repos; issues say Repositories)
+ALIASES = {'Repositories': ('Repositories', 'Repository', 'Repos'), 'Tests Required': ('Tests Required', 'Tests')}
 NOTHING = {'none', 'none.', '-', 'n/a', 'na', 'nothing', '(none)', '_none_', 'none at this time.'}
 TERMINAL = ('Done', 'Canceled', 'Duplicate')
 
@@ -96,7 +99,8 @@ def sections(description):
     """The issue-template sections; a missing section is None, never an empty string."""
     found = {}
     for name in SECTIONS:
-        m = re.search(rf'^#{{2,3}}\s*{re.escape(name)}\s*$\n(.*?)(?=^#{{2,3}}\s|\Z)', description or '', re.M | re.S | re.I)
+        names = '|'.join(re.escape(n) for n in ALIASES.get(name, (name,)))
+        m = re.search(rf'^#{{2,3}}[ \t]*(?:{names})[ \t]*:?[ \t]*$\n(.*?)(?=^#{{2,3}}\s|\Z)', (description or '') + '\n', re.M | re.S | re.I)
         found[name] = m[1].strip() if m else None
     return found
 
@@ -149,8 +153,27 @@ def normalize_issue(raw):
 def load_snapshot(path):
     """Issues from a JSON file an agent wrote from its Linear connector: one issue, a list, or
     {'issues': [...]}. Later entries for the same issue fill in fields earlier ones lacked."""
-    doc = json.loads(Path(path).read_text(encoding='utf-8'))
-    rows = doc.get('issues', [doc]) if isinstance(doc, dict) else doc
+    return parse_snapshot(Path(path).read_text(encoding='utf-8'))
+
+
+def parse_snapshot(text):
+    """{id: issue} from snapshot text. Besides the three document shapes, several JSON documents
+    back to back are accepted, so an agent can pipe connector results without assembling a file.
+    Anything else raises ValueError: an unreadable snapshot is never an empty one."""
+    decoder, at, rows = json.JSONDecoder(), 0, []
+    text = text.strip()
+    if not text:
+        raise ValueError('empty snapshot')
+    while at < len(text):
+        doc, at = decoder.raw_decode(text, at)
+        while at < len(text) and text[at].isspace():
+            at += 1
+        if isinstance(doc, dict):
+            rows += doc.get('issues', [doc])
+        elif isinstance(doc, list):
+            rows += doc
+        else:
+            raise ValueError('snapshot holds something that is not an issue')
     merged = {}
     for raw in rows:
         issue = normalize_issue(raw)
@@ -191,10 +214,11 @@ def linear(issue=None, snapshot=None, token=None, graphql=_graphql, find_token=t
     """
     snapshot = snapshot or os.environ.get('AI_WORKFLOW_LINEAR_SNAPSHOT')
     if snapshot:
+        label = 'snapshot on stdin' if snapshot == '-' else f'snapshot {Path(snapshot).name}'
         try:
-            return {**ok(load_snapshot(snapshot)), 'origin': f'snapshot {Path(snapshot).name}'}
+            return {**ok(parse_snapshot(sys.stdin.read()) if snapshot == '-' else load_snapshot(snapshot)), 'origin': label}
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-            return unavailable(f'Linear snapshot {Path(snapshot).name} unreadable ({type(e).__name__})')
+            return unavailable(f'Linear {label} unreadable ({type(e).__name__})')
     where = 'given token'
     if not token:
         token, where = find_token()

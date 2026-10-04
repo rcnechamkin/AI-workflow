@@ -58,6 +58,28 @@ issue's existing worktree or unmerged branch (or creates `type/avr-N-description
 prints paths, the repositories' `AGENTS.md` and the follow-up commands. It creates nothing when it
 refuses.
 
+**The agent path is one step.** An agent with a Linear connector fetches the issue (with its
+relations) and pipes the result straight in; no file, no extra flags when the issue follows the
+template:
+
+```sh
+<connector get_issue AVR-236 as JSON> | python aw.py start AVR-236 --linear-snapshot -
+```
+
+Several JSON documents back to back are accepted, so dependency issues can be piped along. The
+answer is either the claimed worktree(s), or a refusal that names what is missing and how to fix
+it (`fix:` lines; `readiness.missing_sections` and `readiness.hints` in `--json`). `--dry-run`
+gives the same answer and the plan while fetching, creating and claiming nothing.
+
+Section headings are matched as real issues write them: `Repositories`, `Repository` or `Repos`;
+`Tests Required` or `Tests`; any case, optional trailing colon. Repositories may be named in full
+(`avrana-party-games`) or by short name (`Games`, `Party`, `both`). Open Decisions is deliberately
+strict: only an empty section or `None` means none. "None blocking, but ..." is reported as
+unresolved, with the text quoted.
+
+`bin/avr` (and `bin/avr.cmd`) is the same CLI under a shorter name: put `bin` on your `PATH` and
+`avr start AVR-236` is `python aw.py start AVR-236`.
+
 When the issue does not follow the template the owner can supply what is missing:
 `--repo party|games|both`, and `--decisions-confirmed` (the owner's statement that no product
 decision is open; an agent must not pass it on its own).
