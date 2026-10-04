@@ -109,6 +109,7 @@ def context_lines(ctx):
     out = [f'{ctx["issue"]}: {lin["title"]}' if lin else f'{ctx["issue"]}: (Linear not read)',
            f'  State    {r["label"]}' + (' - an agent may start' if r['can_start'] else '')]
     out += [f'           {x}' for x in r['reasons']] + [f'           missing: {x}' for x in r['missing']]
+    out += [f'           fix: {x}' for x in r['hints']]
     if lin:
         where = ' / '.join(filter(None, [lin['project'], lin['milestone'], f'parent {lin["parent"]}' if lin['parent'] else None]))
         out.append(f'  Linear   {lin["state"]}; Open Decisions: {lin["open_decisions"]}; labels: {", ".join(lin["labels"]) or "none"}'
@@ -407,7 +408,8 @@ def main(argv=None):
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument('--json', action='store_true', help='structured output')
     common.add_argument('--owner', help='session label (default: AI_WORKFLOW_SESSION, else the Claude session)')
-    common.add_argument('--linear-snapshot', help='JSON file of Linear issue(s), instead of the Linear API')
+    common.add_argument('--linear-snapshot', metavar='FILE|-',
+                        help='Linear issue(s) as JSON from a file, or - for stdin, instead of the Linear API')
     ap = argparse.ArgumentParser(prog='ai-workflow', description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='command', required=True)
     sub.add_parser('status', parents=[common])

@@ -98,8 +98,8 @@ def repositories(cfg, issue, trees, prs, override=None):
     if override:
         return {'value': sorted(override), 'basis': 'given on the command line'}
     declared = sources.sections(issue['description'])['Repositories'] if issue and issue.get('description') else None
-    named = set(re.findall(r'[a-z][a-z0-9-]+', declared or ''))
-    repos = sorted(n for n, r in cfg['repos'].items() if r['dir'] in named)
+    named = set(re.findall(r'[a-z][a-z0-9-]+', (declared or '').lower()))
+    repos = sorted(n for n, r in cfg['repos'].items() if r['dir'].lower() in named or n.lower() in named or 'both' in named)
     if repos:
         return {'value': repos, 'basis': 'Repositories section of the issue'}
     seen = sorted({t['repo'] for t in trees} | {p['repo'] for p in prs})
@@ -108,17 +108,25 @@ def repositories(cfg, issue, trees, prs, override=None):
     return {'value': None, 'basis': 'undetermined: the issue does not declare Repositories and no branch exists yet'}
 
 
-def readiness(issue, decisions, repos, linear_data, trees, prs, github_ok, me=None, now=None, decisions_confirmed=False):
+def readiness(issue, decisions, repos, linear_data, trees, prs, github_ok, me=None, now=None, decisions_confirmed=False,
+              repo_names=()):
     """One state from Linear, GitHub and git, with the evidence. No state of its own:
 
     done, ready-for-playtest, pr-ci, needs-cody, blocked, in-progress, ready-for-agent, or
     unknown when the evidence for any of those is incomplete. `can_start` says whether an agent
     may begin (or resume) now.
     """
-    reasons, missing = [], []
+    reasons, missing, sections, hints = [], [], [], []
 
     def result(state, can_start=False):
-        return {'state': state, 'label': STATES[state], 'can_start': can_start, 'reasons': reasons, 'missing': missing}
+        # whatever decided the state, say so when another session holds the issue's worktree
+        reasons.extend(line for line in held_by_others if line not in reasons)
+        return {'state': state, 'label': STATES[state], 'can_start': can_start, 'reasons': reasons, 'missing': missing,
+                'missing_sections': sections, 'hints': hints}
+
+    foreign = [t for t in trees if t['claim_state'] in ('held', 'handoff') and t['claim']['owner'] != me
+               and not (t['claim_state'] == 'handoff' and t['claim']['handoff_to'] in ('any', me))]
+    held_by_others = [f'{t["repo"]} worktree {t["path"]} is claimed by {claims.describe(t["claim"], now)}' for t in foreign]
 
     if issue is None:
         missing.append('the Linear issue')
@@ -143,7 +151,10 @@ def readiness(issue, decisions, repos, linear_data, trees, prs, github_ok, me=No
         reasons.append('Linear state In Review' + (f'; {len(merged)} PR(s) merged, none open' if merged else '; no PR found'))
         return result('pr-ci')
     if decisions == 'unresolved' and not decisions_confirmed:
-        reasons.append('Open Decisions holds an unresolved question for the owner')
+        said = ' '.join((sources.sections(issue['description'])['Open Decisions'] or '').split())
+        reasons.append(f'Open Decisions is not empty: it reads "{said[:200]}{"..." if len(said) > 200 else ""}"')
+        hints.append('only an empty section or "None" counts as no open decisions; anything else is the owner\'s to resolve '
+                     '(edit the issue, or the owner passes --decisions-confirmed)')
         return result('needs-cody')
     if issue['state'] == 'Backlog':
         reasons.append('Linear state Backlog: not scheduled for an agent')
@@ -155,23 +166,23 @@ def readiness(issue, decisions, repos, linear_data, trees, prs, github_ok, me=No
     blockers = []
     if issue['blocked_by'] is None:
         missing.append('the issue\'s dependencies (this Linear read did not include relations)')
+        hints.append('fetch the issue with its relations (the connector\'s includeRelations) and pass that')
     for dep in issue['blocked_by'] or []:
         state = issue['dependency_states'].get(dep) or (linear_data.get(dep) or {}).get('state')
         if not state:
             missing.append(f'the state of dependency {dep}')
+            hints.append(f'add {dep} to the snapshot (its state is all that is needed)')
         elif state not in sources.TERMINAL:
             blockers.append(f'{dep} ({state})')
     if blockers:
         reasons.append('blocked by ' + ', '.join(blockers))
         return result('blocked')
 
-    foreign = [t for t in trees if t['claim_state'] in ('held', 'handoff') and t['claim']['owner'] != me
-               and not (t['claim_state'] == 'handoff' and t['claim']['handoff_to'] in ('any', me))]
     abandoned = [t for t in trees if t['claim_state'] == 'stale' and t['claim']['owner'] != me and t['busy']]
     unreadable = [t for t in trees if t['claim_state'] == 'corrupt']
     active = [t for t in trees if t['busy'] or (t['drift'] and t['drift'][0]) or t['claim_state'] != 'free']
     if foreign or abandoned or unreadable:
-        reasons += [f'{t["repo"]} worktree {t["path"]} is claimed by {claims.describe(t["claim"], now)}' for t in foreign]
+        reasons += held_by_others
         reasons += [f'{t["repo"]} worktree {t["path"]} has a stale claim by {t["claim"]["owner"]} over {t["busy"]}: '
                     'taking it over is an owner decision' for t in abandoned]
         reasons += [f'{t["repo"]} worktree {t["path"]} has an unreadable claim file' for t in unreadable]
@@ -189,8 +200,12 @@ def readiness(issue, decisions, repos, linear_data, trees, prs, github_ok, me=No
     if decisions in ('missing', 'unknown') and not decisions_confirmed:
         missing.append('an Open Decisions section saying none (the issue has no such section)' if decisions == 'missing'
                        else 'the issue description (Open Decisions could not be read)')
+        sections.append('Open Decisions')
+        hints.append('add a "## Open Decisions" section saying None to the issue, or the owner passes --decisions-confirmed')
     if not repos['value']:
-        missing.append('which repositories the issue touches (no Repositories section; pass --repo)')
+        missing.append('which repositories the issue touches (no Repositories section)')
+        sections.append('Repositories')
+        hints.append('add a "## Repositories" (or "## Repos") section naming ' + ' and/or '.join(repo_names) + ', or pass --repo')
     if missing:
         return result('unknown')
     reasons.append('Todo, no open decisions, no unfinished dependency, no other session on it')
@@ -241,7 +256,8 @@ def issue_context(cfg, issue_id, ws, linear, prs_by_repo, pi, me=None, now=None,
         ctx['deployed'] = None
         ctx['unavailable'].append({'source': 'pi', 'reason': pi['reason']})
     ctx['readiness'] = readiness(issue, decisions, ctx['repositories'], linear['data'] if linear['available'] else {},
-                                 trees, prs, github_ok, me=me, now=now, decisions_confirmed=decisions_confirmed)
+                                 trees, prs, github_ok, me=me, now=now, decisions_confirmed=decisions_confirmed,
+                                 repo_names=[r['dir'] for r in cfg['repos'].values()])
     return ctx
 
 
