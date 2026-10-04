@@ -160,6 +160,21 @@ class ReadinessTests(RepoCase):
         self.assertEqual(self.state('AVR-900', linear, me=None), ('in-progress', False))        # no identity is not the owner
         self.assertEqual(self.state('AVR-900', linear, me='claude-aaaa'), ('in-progress', True))  # the owner resumes
 
+    def test_refusal_decided_by_linear_state_still_names_the_session_holding_the_worktree(self):
+        wt = self.add_worktree('party', 'feat/avr-900-x', 'avrana-party.wt-avr900')
+        claims.acquire(claims.claim_file(gitio.common_dir(wt), wt), wt, 'claude-aaaa', issue='AVR-900')
+        for state, want in (('Backlog', 'needs-cody'), ('Done', 'done'), ('In Review', 'pr-ci')):
+            r = self.context('AVR-900', linear_of(issue('AVR-900', state=state, description=PARTY_ONLY)), me='codex-b')['readiness']
+            self.assertEqual(r['state'], want)
+            self.assertTrue(any('claimed by claude-aaaa' in x for x in r['reasons']), (state, r['reasons']))
+            mine = self.context('AVR-900', linear_of(issue('AVR-900', state=state, description=PARTY_ONLY)), me='claude-aaaa')['readiness']
+            self.assertFalse(any('claimed by' in x for x in mine['reasons']), state)
+        undecided = self.context('AVR-900', linear_of(issue('AVR-900', description=UNDECIDED)), me='codex-b')['readiness']
+        self.assertEqual(undecided['state'], 'needs-cody')
+        self.assertTrue(any('claimed by claude-aaaa' in x for x in undecided['reasons']))
+        held = self.context('AVR-900', linear_of(issue('AVR-900', description=PARTY_ONLY)), me='codex-b')['readiness']
+        self.assertEqual(sum('claimed by claude-aaaa' in x for x in held['reasons']), 1)      # said once, not twice
+
     def test_unfinished_work_in_an_existing_worktree(self):
         wt = self.add_worktree('party', 'feat/avr-900-x', 'avrana-party.wt-avr900')
         (wt / 'README.md').write_text('half\n', encoding='utf-8')

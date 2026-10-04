@@ -119,8 +119,14 @@ def readiness(issue, decisions, repos, linear_data, trees, prs, github_ok, me=No
     reasons, missing, sections, hints = [], [], [], []
 
     def result(state, can_start=False):
+        # whatever decided the state, say so when another session holds the issue's worktree
+        reasons.extend(line for line in held_by_others if line not in reasons)
         return {'state': state, 'label': STATES[state], 'can_start': can_start, 'reasons': reasons, 'missing': missing,
                 'missing_sections': sections, 'hints': hints}
+
+    foreign = [t for t in trees if t['claim_state'] in ('held', 'handoff') and t['claim']['owner'] != me
+               and not (t['claim_state'] == 'handoff' and t['claim']['handoff_to'] in ('any', me))]
+    held_by_others = [f'{t["repo"]} worktree {t["path"]} is claimed by {claims.describe(t["claim"], now)}' for t in foreign]
 
     if issue is None:
         missing.append('the Linear issue')
@@ -172,13 +178,11 @@ def readiness(issue, decisions, repos, linear_data, trees, prs, github_ok, me=No
         reasons.append('blocked by ' + ', '.join(blockers))
         return result('blocked')
 
-    foreign = [t for t in trees if t['claim_state'] in ('held', 'handoff') and t['claim']['owner'] != me
-               and not (t['claim_state'] == 'handoff' and t['claim']['handoff_to'] in ('any', me))]
     abandoned = [t for t in trees if t['claim_state'] == 'stale' and t['claim']['owner'] != me and t['busy']]
     unreadable = [t for t in trees if t['claim_state'] == 'corrupt']
     active = [t for t in trees if t['busy'] or (t['drift'] and t['drift'][0]) or t['claim_state'] != 'free']
     if foreign or abandoned or unreadable:
-        reasons += [f'{t["repo"]} worktree {t["path"]} is claimed by {claims.describe(t["claim"], now)}' for t in foreign]
+        reasons += held_by_others
         reasons += [f'{t["repo"]} worktree {t["path"]} has a stale claim by {t["claim"]["owner"]} over {t["busy"]}: '
                     'taking it over is an owner decision' for t in abandoned]
         reasons += [f'{t["repo"]} worktree {t["path"]} has an unreadable claim file' for t in unreadable]
