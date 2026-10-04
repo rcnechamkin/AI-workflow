@@ -75,9 +75,10 @@ class ValidateTests(PipelineCase):
         before = git(path, 'rev-parse', 'HEAD')
 
         def run_and_commit(command, cwd, timeout=None):
-            (path / 'late.py').write_text('late\n', encoding='utf-8')
-            git(path, 'add', '-A')
-            git(path, 'commit', '-q', '-m', 'late')
+            if not (path / 'late.py').exists():
+                (path / 'late.py').write_text('late\n', encoding='utf-8')
+                git(path, 'add', '-A')
+                git(path, 'commit', '-q', '-m', 'late')
             return 0, ''
 
         cfg = model.load_config(self.root / 'workflow.json', self.root)
